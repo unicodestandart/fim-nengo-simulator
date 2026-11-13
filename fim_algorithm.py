@@ -47,7 +47,7 @@ def level_window_ms(level: int) -> int:
 
 @dataclass
 class FIM:
-    """Функциональный информационный модуль: до 3 базовых нейронов (Б1..Б3) + головной (Г)."""
+    """Функциональный информационный модуль: 3 базовых нейрона (Б1, Б2, Б3) + 1 головной (Г)."""
 
     fim_id: int
     level: int
@@ -60,8 +60,7 @@ class FIM:
     training_stage: str = ""
     decoded_text: str = ""
     synapse_counts: Tuple[int, ...] = ()  # Кол-во синапсов на каждый вход Б1..Б3 (пусто = по 1 шт.)
-    synapse_weights: Tuple[float, ...] = ()  # Веса синапсов (пусто = 1.05)
-    v_threshold: float = 2.0
+    outgoing_synapses_per_fim: Optional[int] = None  # Кол-во синапсов от Г этого ФИМ вверх на БН L+1
     custom_window_ms: Optional[int] = None
 
     def get_counts(self) -> Tuple[int, ...]:
@@ -69,19 +68,6 @@ class FIM:
         if len(self.synapse_counts) == n:
             return self.synapse_counts
         return (1,) * n
-
-    def get_weights(self) -> Tuple[float, ...]:
-        n = len(self.sources)
-        if len(self.synapse_weights) == n:
-            return self.synapse_weights
-        return (1.05,) * n
-
-    def slot_drive(self, slot_pos: int) -> float:
-        counts = self.get_counts()
-        weights = self.get_weights()
-        c = counts[slot_pos] if slot_pos < len(counts) else 1
-        w = weights[slot_pos] if slot_pos < len(weights) else 1.05
-        return float(w) * (1.0 + 0.15 * max(0, int(c) - 1))
 
     def effective_window_ms(self, default_win: int) -> int:
         return int(self.custom_window_ms) if (self.custom_window_ms and self.custom_window_ms > 0) else int(default_win)
@@ -117,8 +103,10 @@ class LevelPool:
         self.min_synapses = 2
         self.max_synapses = 3
         self.default_synapse_count = 1
-        self.default_weight = 1.05
-        self.v_threshold = 2.0
+        self.synapses_per_fim_out = 500  # Квота исходящих синапсов от 1 ФИМ (Г) на БН уровня L+1
+        self.synapses_to_b1 = 1
+        self.synapses_to_b2 = 1
+        self.synapses_to_b3 = 1
         self.level2_max_chars = 6
         self.get_decoded_text = get_decoded_text
         self.fims: List[FIM] = []
@@ -149,8 +137,14 @@ class LevelPool:
         fim_id = len(self.fims)
         slots = (0, 2) if len(seq) == 2 else (0, 1, 2)
         decoded = "".join(self.get_decoded_text(self.level - 1, s) for s in seq)
-        counts = (self.default_synapse_count,) * len(seq) if self.default_synapse_count != 1 else ()
-        weights = (round(self.default_weight, 3),) * len(seq) if abs(self.default_weight - 1.05) > 1e-6 else ()
+        if self.synapses_to_b1 != 1 or self.synapses_to_b2 != 1 or self.synapses_to_b3 != 1:
+            counts = (self.synapses_to_b1, self.synapses_to_b3) if len(seq) == 2 else (
+                self.synapses_to_b1, self.synapses_to_b2, self.synapses_to_b3
+            )
+        elif self.default_synapse_count != 1:
+            counts = (self.default_synapse_count,) * len(seq)
+        else:
+            counts = ()
         fim = FIM(
             fim_id=fim_id,
             level=self.level,
@@ -162,8 +156,6 @@ class LevelPool:
             training_stage=stage_str,
             decoded_text=decoded,
             synapse_counts=counts,
-            synapse_weights=weights,
-            v_threshold=self.v_threshold,
         )
         self.fims.append(fim)
         self.pattern_index[seq] = fim_id
@@ -291,16 +283,12 @@ class InstinctNetwork:
 
     def __init__(self, num_levels: int = 9, max_fims_per_level: int = 1_000_000) -> None:
         self.num_levels = num_levels
-        self.tick_ms: int = TICK_MS
-        self.instinct_cycle_ms: int = INSTINCT_CYCLE_MS
-        self.dt_ms: int = 12
-        self.tau_leak_factor: float = 1.4
-        self.allow_associative_2of3: bool = True
-        self.associative_confidence: float = 0.67
-        self.level2_max_chars: int = 6
-        self.default_v_threshold: float = 2.0
-        self.default_synapse_weight: float = 1.05
-        self.default_synapse_count: int = 1
+        self.tick_ms: int = TICK_MS  # Такт подачи элементов L0 и длительность импульса БН (84 мс)
+        self.instinct_cycle_ms: int = INSTINCT_CYCLE_MS  # Цикл нейрона инстинкта (252 мс = 3 * 84 мс)
+        self.allow_associative_2of3: bool = True  # Узнавание 3-синапсного ФИМ по 2 из 3 сигналов в порядке
+        self.level2_max_chars: int = 6  # Физический предел Уровня 2 <= 6 символов
+        self.synapses_per_element_l0: int = 1000  # Кол-во синапсов от 1 элемента L0 на Б1..Б3 Ур. 1
+        self.element_out_quotas: Dict[int, int] = {}  # Индивидуальная квота синапсов для элементов L0
 
         self.char_to_id: Dict[str, int] = {ch: i for i, ch in enumerate(RUSSIAN_ALPHABET)}
         self.id_to_char: Dict[int, str] = {i: ch for i, ch in enumerate(RUSSIAN_ALPHABET)}
@@ -395,7 +383,7 @@ class InstinctNetwork:
         return out
 
     def probe_stream(self, text: str) -> List[SignalEvent]:
-        """Прогоняет текст без изменения памяти (read-only) с полным и 2-из-3 спайковым узнаванием."""
+        """Прогоняет текст без изменения памяти (read-only) с полным (3/3, 2/2) и 2-из-3 узнаванием."""
         clean = normalize_text(text)
         if not clean:
             return []
@@ -410,16 +398,12 @@ class InstinctNetwork:
             if seq in pool.pattern_index:
                 fid = pool.pattern_index[seq]
                 fim = pool.fims[fid]
-                if fim.consolidated:
-                    if span_ms > fim.effective_window_ms(pool.window_ms):
-                        return None
-                    total_drive = sum(fim.slot_drive(i) for i in range(len(fim.sources)))
-                    if total_drive + 1e-9 >= fim.v_threshold:
-                        return fid
+                if fim.consolidated and span_ms <= fim.effective_window_ms(pool.window_ms):
+                    return fid
             return None
 
         def run_associative_2of3(lvl: int) -> None:
-            """Ассоциативное спайковое узнавание 2-из-3 для уровней >= 2 (V >= fim.v_threshold)."""
+            """Узнавание 3-синапсного ФИМ по 2 из 3 сигналов снизу внутри окна W_L (уровни >= 2)."""
             if not self.allow_associative_2of3 or lvl < 2 or lvl > self.num_levels:
                 return
             pool = self.levels[lvl]
@@ -428,7 +412,6 @@ class InstinctNetwork:
                 return
 
             used_indices: set[int] = set()
-            # Группируем спайки по кандидатным 3-синаптическим ФИМам через incoming_synapses
             while True:
                 hits_by_fim: Dict[int, List[Tuple[int, int, int]]] = defaultdict(list)
                 for idx, (t_sp, src_id) in enumerate(spikes):
@@ -440,13 +423,12 @@ class InstinctNetwork:
                             continue
                         hits_by_fim[fid].append((idx, slot_idx, t_sp))
 
-                best_match: Optional[Tuple[int, int, int, int, int, int, int, int, int, float]] = None
+                best_match: Optional[Tuple[int, int, int, int, int, int, int, int, int]] = None
                 for fid, hits in hits_by_fim.items():
                     if len(hits) < 2:
                         continue
                     fim = pool.fims[fid]
                     eff_win = fim.effective_window_ms(pool.window_ms)
-                    full_drive = max(sum(fim.slot_drive(i) for i in range(3)), 0.01)
                     for a_pos in range(len(hits)):
                         i1, s1, t1 = hits[a_pos]
                         for b_pos in range(a_pos + 1, len(hits)):
@@ -455,19 +437,15 @@ class InstinctNetwork:
                                 continue
                             if (t2 - t1) > eff_win:
                                 continue
-                            drive2 = fim.slot_drive(s1) + fim.slot_drive(s2)
-                            if drive2 + 1e-9 < fim.v_threshold:
-                                continue
-                            conf = min(0.99, round(drive2 / full_drive, 2))
                             score = (fim.recognitions, -t2, -fid)
-                            cand = (score[0], score[1], score[2], fid, i1, i2, s1, s2, t2, conf)
+                            cand = (score[0], score[1], score[2], fid, i1, i2, s1, s2, t2)
                             if best_match is None or cand[:3] > best_match[:3]:
                                 best_match = cand
 
                 if best_match is None:
                     break
 
-                _, _, _, fid, i1, i2, s1, s2, t_ev, conf = best_match
+                _, _, _, fid, i1, i2, s1, s2, t_ev = best_match
                 used_indices.add(i1)
                 used_indices.add(i2)
                 fim = pool.fims[fid]
@@ -478,7 +456,7 @@ class InstinctNetwork:
                         node_id=fid,
                         time_ms=t_ev,
                         event_type="recognition",
-                        confidence=conf,
+                        confidence=0.67,
                         active_slots=active,
                     )
                 )
@@ -618,17 +596,49 @@ class InstinctNetwork:
 
         return cur_lvl, cur_fid, self.decode_fim(cur_lvl, cur_fid)
 
+    def _parent_links_with_slots(self, level: int, node_id: int) -> List[Dict[str, Any]]:
+        """Возвращает родительские ФИМы на уровне level+1 с точным указанием слота Б1/Б2/Б3 и кол-ва синапсов."""
+        if level >= self.num_levels:
+            return []
+        next_pool = self.levels[level + 1]
+        out: List[Dict[str, Any]] = []
+        for (p_lvl, p_fid) in self.parent_fims.get((level, node_id), []):
+            if p_lvl != level + 1:
+                continue
+            pfim = next_pool.fims[p_fid]
+            if not pfim.consolidated:
+                continue
+            counts = pfim.get_counts()
+            for idx, src in enumerate(pfim.sources):
+                if src == node_id:
+                    slot_num = pfim.synapse_slots[idx] if idx < len(pfim.synapse_slots) else idx
+                    out.append(
+                        {
+                            "level": p_lvl,
+                            "fim_id": p_fid,
+                            "text": self.decode_fim(p_lvl, p_fid),
+                            "recognitions": pfim.recognitions,
+                            "target_slot": f"Б{slot_num + 1}",
+                            "synapse_count": counts[idx] if idx < len(counts) else 1,
+                        }
+                    )
+        return out
+
     def explain_fim(self, level: int, fim_id: int, max_depth: int = 4) -> Dict[str, Any]:
-        """Возвращает подробную аналитику ФИМа: синапсы, веса, пороги, родителей и дерево детей."""
+        """Возвращает аналитику ФИМа или элемента L0 строго по ТЗ: синапсы Б1..Б3, Г, окно и связи."""
         if level == 0:
+            parents = self._parent_links_with_slots(0, fim_id)
+            actual_out = sum(p["synapse_count"] for p in parents)
+            b1_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б1")
+            b2_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б2")
+            b3_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б3")
+            quota = self.element_out_quotas.get(fim_id, self.synapses_per_element_l0)
             return {
                 "level": 0,
                 "fim_id": fim_id,
                 "text": self.id_to_char.get(fim_id, "?"),
                 "synapse_slots": [],
                 "synapse_counts": [],
-                "synapse_weights": [],
-                "v_threshold": 0.0,
                 "window_ms": self.tick_ms,
                 "custom_window_ms": None,
                 "consolidated": True,
@@ -637,24 +647,21 @@ class InstinctNetwork:
                 "created_at_ms": 0,
                 "training_context": "",
                 "training_stage": "Уровень 0 (элемент)",
-                "parents": [],
+                "outgoing_synapses_per_fim": quota,
+                "actual_out_synapses": actual_out,
+                "out_by_slot": {"Б1": b1_out, "Б2": b2_out, "Б3": b3_out},
+                "parents": parents[:40],
                 "children": [],
             }
 
         fim = self.levels[level].fims[fim_id]
         pool = self.levels[level]
         counts = fim.get_counts()
-        weights = fim.get_weights()
-        parents = [
-            {
-                "level": p_lvl,
-                "fim_id": p_fid,
-                "text": self.decode_fim(p_lvl, p_fid),
-                "recognitions": self.levels[p_lvl].fims[p_fid].recognitions,
-            }
-            for (p_lvl, p_fid) in self.parent_fims.get((level, fim_id), [])
-            if self.levels[p_lvl].fims[p_fid].consolidated
-        ]
+        parents = self._parent_links_with_slots(level, fim_id)
+        actual_out = sum(p["synapse_count"] for p in parents)
+        b1_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б1")
+        b2_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б2")
+        b3_out = sum(p["synapse_count"] for p in parents if p["target_slot"] == "Б3")
 
         children: List[Dict[str, Any]] = []
         if max_depth > 0:
@@ -665,8 +672,6 @@ class InstinctNetwork:
                 child_info["slot"] = slot_label
                 child_info["slot_index"] = fim.synapse_slots[idx] if idx < len(fim.synapse_slots) else idx
                 child_info["synapse_count"] = counts[idx] if idx < len(counts) else 1
-                child_info["weight"] = round(weights[idx] if idx < len(weights) else 1.05, 3)
-                child_info["drive"] = round(fim.slot_drive(idx), 3)
                 children.append(child_info)
 
         return {
@@ -675,8 +680,6 @@ class InstinctNetwork:
             "text": self.decode_fim(level, fim.fim_id),
             "synapse_slots": list(fim.synapse_slots),
             "synapse_counts": list(counts),
-            "synapse_weights": [round(w, 3) for w in weights],
-            "v_threshold": round(fim.v_threshold, 3),
             "window_ms": fim.effective_window_ms(pool.window_ms),
             "custom_window_ms": fim.custom_window_ms,
             "consolidated": fim.consolidated,
@@ -685,7 +688,14 @@ class InstinctNetwork:
             "created_at_ms": fim.created_at_ms,
             "training_context": fim.training_context,
             "training_stage": fim.training_stage,
-            "parents": parents[:20],
+            "outgoing_synapses_per_fim": (
+                fim.outgoing_synapses_per_fim
+                if fim.outgoing_synapses_per_fim is not None
+                else pool.synapses_per_fim_out
+            ),
+            "actual_out_synapses": actual_out,
+            "out_by_slot": {"Б1": b1_out, "Б2": b2_out, "Б3": b3_out},
+            "parents": parents[:30],
             "children": children,
         }
 
@@ -701,7 +711,6 @@ class InstinctNetwork:
         pool = self.levels[level]
         pool.pattern_index.clear()
         self.incoming_synapses[level].clear()
-        # Очищаем все ссылки в parent_fims, ведущие в level
         for key in list(self.parent_fims.keys()):
             lst = [item for item in self.parent_fims[key] if item[0] != level]
             if lst:
@@ -731,7 +740,7 @@ class InstinctNetwork:
             if child_level == 0:
                 if spec in self.id_to_char:
                     return spec
-                raise ValueError(f"Неизвестный символ L0 #{spec}")
+                raise ValueError(f"Неизвестный элемент L0 #{spec}")
             pool = self.levels[child_level]
             if 0 <= spec < len(pool.fims):
                 return spec
@@ -752,7 +761,6 @@ class InstinctNetwork:
                 raise ValueError(f"Символ {s!r} вне алфавита L0")
             return self.char_to_id[ch]
 
-        # Поиск по декодированному тексту на child_level
         pool = self.levels[child_level]
         target = normalize_text(s)
         if not target:
@@ -761,7 +769,6 @@ class InstinctNetwork:
             if f.consolidated and (f.decoded_text or self.decode_fim(child_level, f.fim_id)) == target:
                 return f.fim_id
 
-        # Если нет точного совпадения на L1 и строка 2..3 символа — создаём/обучаем автоматически
         if child_level == 1 and 2 <= len(target) <= 3:
             seq = tuple(self.char_to_id[c] for c in target)
             ev = pool._emit_seq(seq, self.current_time_ms, context_str=target, stage_str="Ручная настройка")
@@ -770,77 +777,142 @@ class InstinctNetwork:
                 return ev.node_id
         raise ValueError(f"На уровне L{child_level} не найден ФИМ со значением {target!r}")
 
+    def _compute_synapse_metrics(self) -> Dict[str, Any]:
+        """Подсчитывает фактические синапсы между всеми уровнями L0 -> L1 -> ... -> L9."""
+        per_lvl: Dict[int, Dict[str, int]] = {}
+        for lvl in range(1, self.num_levels + 1):
+            pool = self.levels[lvl]
+            in_b1 = 0
+            in_b2 = 0
+            in_b3 = 0
+            two_syn = 0
+            three_syn = 0
+            cons_cnt = 0
+            tot_rec = 0
+            for f in pool.fims:
+                if not f.consolidated:
+                    continue
+                cons_cnt += 1
+                tot_rec += f.recognitions
+                if len(f.sources) == 2:
+                    two_syn += 1
+                else:
+                    three_syn += 1
+                sc = f.synapse_counts
+                slots = f.synapse_slots
+                for i, sl in enumerate(slots):
+                    cnt = sc[i] if len(sc) == len(slots) else 1
+                    if sl == 0:
+                        in_b1 += cnt
+                    elif sl == 1:
+                        in_b2 += cnt
+                    else:
+                        in_b3 += cnt
+            per_lvl[lvl] = {
+                "consolidated_fims": cons_cnt,
+                "two_synapse_fims": two_syn,
+                "three_synapse_fims": three_syn,
+                "total_recognitions": tot_rec,
+                "actual_in_b1": in_b1,
+                "actual_in_b2": in_b2,
+                "actual_in_b3": in_b3,
+                "actual_in_total": in_b1 + in_b2 + in_b3,
+            }
+
+        l0_elements: List[Dict[str, Any]] = []
+        l1_pool = self.levels[1]
+        l0_total_out = 0
+        for nid in range(len(RUSSIAN_ALPHABET)):
+            b1 = b2 = b3 = 0
+            for fid, slot_idx in self.incoming_synapses[1].get(nid, ()):
+                f = l1_pool.fims[fid]
+                if not f.consolidated:
+                    continue
+                c = f.synapse_counts[slot_idx] if len(f.synapse_counts) == len(f.sources) else 1
+                sl = f.synapse_slots[slot_idx] if slot_idx < len(f.synapse_slots) else slot_idx
+                if sl == 0:
+                    b1 += c
+                elif sl == 1:
+                    b2 += c
+                else:
+                    b3 += c
+            tot = b1 + b2 + b3
+            l0_total_out += tot
+            l0_elements.append(
+                {
+                    "node_id": nid,
+                    "char": self.id_to_char[nid],
+                    "out_synapses": tot,
+                    "b1": b1,
+                    "b2": b2,
+                    "b3": b3,
+                    "quota": self.element_out_quotas.get(nid, self.synapses_per_element_l0),
+                }
+            )
+        return {"per_lvl": per_lvl, "l0_elements": l0_elements, "l0_total_out": l0_total_out}
+
     def get_config(self) -> Dict[str, Any]:
-        """Возвращает текущие глобальные и поуровневые параметры сети."""
+        """Возвращает строго ТЗ-параметры сети, элементов L0 и уровней L1..L9."""
+        metrics = self._compute_synapse_metrics()
+        per_lvl = metrics["per_lvl"]
         levels_cfg: Dict[int, Dict[str, Any]] = {}
         for lvl, pool in self.levels.items():
-            cons = sum(1 for f in pool.fims if f.consolidated)
+            m = per_lvl[lvl]
+            out_tot = per_lvl[lvl + 1]["actual_in_total"] if lvl < self.num_levels else 0
+            cons = m["consolidated_fims"]
             levels_cfg[lvl] = {
                 "level": lvl,
                 "window_ms": pool.window_ms,
                 "min_synapses": pool.min_synapses,
                 "max_synapses": pool.max_synapses,
-                "default_synapse_count": pool.default_synapse_count,
-                "default_weight": round(pool.default_weight, 3),
-                "v_threshold": round(pool.v_threshold, 3),
+                "synapses_to_b1": pool.synapses_to_b1,
+                "synapses_to_b2": pool.synapses_to_b2,
+                "synapses_to_b3": pool.synapses_to_b3,
+                "synapses_per_fim_out": pool.synapses_per_fim_out,
                 "level2_max_chars": pool.level2_max_chars if lvl == 2 else None,
                 "max_fims": pool.max_fims,
                 "consolidated_fims": cons,
+                "two_synapse_fims": m["two_synapse_fims"],
+                "three_synapse_fims": m["three_synapse_fims"],
+                "total_recognitions": m["total_recognitions"],
+                "actual_in_b1": m["actual_in_b1"],
+                "actual_in_b2": m["actual_in_b2"],
+                "actual_in_b3": m["actual_in_b3"],
+                "actual_in_total": m["actual_in_total"],
+                "actual_out_total": out_tot,
+                "avg_out_per_fim": round(out_tot / cons, 2) if cons else 0.0,
             }
         return {
             "num_levels": self.num_levels,
             "tick_ms": self.tick_ms,
             "instinct_cycle_ms": self.instinct_cycle_ms,
-            "dt_ms": self.dt_ms,
-            "tau_leak_factor": round(self.tau_leak_factor, 3),
             "allow_associative_2of3": self.allow_associative_2of3,
             "level2_max_chars": self.level2_max_chars,
-            "default_v_threshold": round(self.default_v_threshold, 3),
-            "default_synapse_weight": round(self.default_synapse_weight, 3),
-            "default_synapse_count": self.default_synapse_count,
+            "synapses_per_element_l0": self.synapses_per_element_l0,
+            "l0_count": len(RUSSIAN_ALPHABET),
+            "l0_total_out": metrics["l0_total_out"],
+            "l0_elements": metrics["l0_elements"],
             "levels": levels_cfg,
         }
 
     def update_config(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """Обновляет параметры сети и уровней; при apply_to_existing=True применяет веса/порог к существующим ФИМ."""
+        """Обновляет строго ТЗ-параметры сети, квоты синапсов L0->L1 и уровней L1..L9."""
         if "tick_ms" in cfg:
             self.tick_ms = max(12, min(1000, int(cfg["tick_ms"])))
         if "instinct_cycle_ms" in cfg:
             self.instinct_cycle_ms = max(self.tick_ms, min(5000, int(cfg["instinct_cycle_ms"])))
-        if "dt_ms" in cfg:
-            self.dt_ms = max(1, min(self.tick_ms, int(cfg["dt_ms"])))
-        if "tau_leak_factor" in cfg:
-            self.tau_leak_factor = max(0.1, min(20.0, float(cfg["tau_leak_factor"])))
         if "allow_associative_2of3" in cfg:
             self.allow_associative_2of3 = bool(cfg["allow_associative_2of3"])
         if "level2_max_chars" in cfg:
             self.level2_max_chars = max(2, min(18, int(cfg["level2_max_chars"])))
             self.levels[2].level2_max_chars = self.level2_max_chars
-
-        apply_existing = bool(cfg.get("apply_to_existing", True))
-        if "default_v_threshold" in cfg:
-            self.default_v_threshold = max(0.2, min(20.0, float(cfg["default_v_threshold"])))
-            for pool in self.levels.values():
-                pool.v_threshold = self.default_v_threshold
-                if apply_existing:
-                    for f in pool.fims:
-                        f.v_threshold = self.default_v_threshold
-        if "default_synapse_weight" in cfg:
-            self.default_synapse_weight = max(0.05, min(10.0, float(cfg["default_synapse_weight"])))
-            for pool in self.levels.values():
-                pool.default_weight = self.default_synapse_weight
-                if apply_existing:
-                    w = round(self.default_synapse_weight, 3)
-                    for f in pool.fims:
-                        f.synapse_weights = () if abs(w - 1.05) < 1e-6 else (w,) * len(f.sources)
-        if "default_synapse_count" in cfg:
-            self.default_synapse_count = max(1, min(32, int(cfg["default_synapse_count"])))
-            for pool in self.levels.values():
-                pool.default_synapse_count = self.default_synapse_count
-                if apply_existing:
-                    c = self.default_synapse_count
-                    for f in pool.fims:
-                        f.synapse_counts = () if c == 1 else (c,) * len(f.sources)
+        if "synapses_per_element_l0" in cfg and cfg["synapses_per_element_l0"] is not None:
+            self.synapses_per_element_l0 = max(1, min(1_000_000, int(cfg["synapses_per_element_l0"])))
+        if "element_quota" in cfg and isinstance(cfg["element_quota"], dict):
+            eq = cfg["element_quota"]
+            nid = int(eq.get("node_id", 0))
+            if nid in self.id_to_char:
+                self.element_out_quotas[nid] = max(1, min(1_000_000, int(eq.get("quota", self.synapses_per_element_l0))))
 
         if "min_synapses" in cfg:
             ms = 2 if int(cfg["min_synapses"]) <= 2 else 3
@@ -851,6 +923,7 @@ class InstinctNetwork:
             for pool in self.levels.values():
                 pool.max_synapses = max(pool.min_synapses, mx)
 
+        apply_syn_counts = bool(cfg.get("apply_synapse_counts_to_existing", False))
         levels_patch = cfg.get("levels") or {}
         for k, lcfg in levels_patch.items():
             lvl = int(k)
@@ -863,18 +936,34 @@ class InstinctNetwork:
                 pool.min_synapses = 2 if int(lcfg["min_synapses"]) <= 2 else 3
             if "max_synapses" in lcfg:
                 pool.max_synapses = max(pool.min_synapses, 2 if int(lcfg["max_synapses"]) <= 2 else 3)
-            if "v_threshold" in lcfg and lcfg["v_threshold"] is not None:
-                vt = max(0.2, min(20.0, float(lcfg["v_threshold"])))
-                pool.v_threshold = vt
-                if apply_existing:
-                    for f in pool.fims:
-                        f.v_threshold = vt
+            if "synapses_per_fim_out" in lcfg and lcfg["synapses_per_fim_out"] is not None:
+                pool.synapses_per_fim_out = max(1, min(1_000_000, int(lcfg["synapses_per_fim_out"])))
+            if "synapses_to_b1" in lcfg and lcfg["synapses_to_b1"] is not None:
+                pool.synapses_to_b1 = max(1, min(1000, int(lcfg["synapses_to_b1"])))
+            if "synapses_to_b2" in lcfg and lcfg["synapses_to_b2"] is not None:
+                pool.synapses_to_b2 = max(1, min(1000, int(lcfg["synapses_to_b2"])))
+            if "synapses_to_b3" in lcfg and lcfg["synapses_to_b3"] is not None:
+                pool.synapses_to_b3 = max(1, min(1000, int(lcfg["synapses_to_b3"])))
             if "max_fims" in lcfg and lcfg["max_fims"] is not None:
                 pool.max_fims = max(len(pool.fims), min(5_000_000, int(lcfg["max_fims"])))
+            if apply_syn_counts and any(x in lcfg for x in ("synapses_to_b1", "synapses_to_b2", "synapses_to_b3")):
+                b1, b2, b3 = pool.synapses_to_b1, pool.synapses_to_b2, pool.synapses_to_b3
+                for f in pool.fims:
+                    if len(f.sources) == 2:
+                        f.synapse_counts = (b1, b3)
+                    else:
+                        f.synapse_counts = (b1, b2, b3)
         return self.get_config()
 
     def update_fim(self, level: int, fim_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Редактирует конкретный ФИМ (слоты Б1..Б3, источники, число синапсов, веса, порог, окно)."""
+        """Редактирует конкретный ФИМ (слоты Б1..Б3, источники, кол-во синапсов на Б1..Б3 и от Г, окно)."""
+        if level == 0:
+            if fim_id not in self.id_to_char:
+                raise ValueError(f"Элемент L0 #{fim_id} не найден")
+            if "outgoing_synapses_per_fim" in data and data["outgoing_synapses_per_fim"] is not None:
+                self.element_out_quotas[fim_id] = max(1, min(1_000_000, int(data["outgoing_synapses_per_fim"])))
+            return self.explain_fim(0, fim_id)
+
         if level not in self.levels:
             raise ValueError(f"Уровень {level} не существует")
         pool = self.levels[level]
@@ -895,23 +984,16 @@ class InstinctNetwork:
             fim.synapse_slots = tuple(int(s) for s in data["synapse_slots"])
 
         if "synapse_counts" in data and isinstance(data["synapse_counts"], list):
-            raw_c = [max(1, min(64, int(c))) for c in data["synapse_counts"][:n_src]]
+            raw_c = [max(1, min(10000, int(c))) for c in data["synapse_counts"][:n_src]]
             while len(raw_c) < n_src:
                 raw_c.append(1)
             fim.synapse_counts = tuple(raw_c)
         elif rebuild:
             fim.synapse_counts = (1,) * n_src
 
-        if "synapse_weights" in data and isinstance(data["synapse_weights"], list):
-            raw_w = [round(max(0.05, min(10.0, float(w))), 3) for w in data["synapse_weights"][:n_src]]
-            while len(raw_w) < n_src:
-                raw_w.append(1.05)
-            fim.synapse_weights = tuple(raw_w)
-        elif rebuild:
-            fim.synapse_weights = (1.05,) * n_src
-
-        if "v_threshold" in data and data["v_threshold"] is not None:
-            fim.v_threshold = max(0.2, min(20.0, float(data["v_threshold"])))
+        if "outgoing_synapses_per_fim" in data:
+            og = data["outgoing_synapses_per_fim"]
+            fim.outgoing_synapses_per_fim = int(og) if (og is not None and str(og).strip() != "" and int(og) > 0) else None
 
         if "custom_window_ms" in data:
             cw = data["custom_window_ms"]
@@ -949,9 +1031,9 @@ class InstinctNetwork:
             isinstance(data.get("synapse_slots"), list) and len(data["synapse_slots"]) == n_src
         ) else ((0, 2) if n_src == 2 else (0, 1, 2))
 
-        counts = tuple(max(1, min(64, int(c))) for c in (data.get("synapse_counts") or [1] * n_src)[:n_src])
-        weights = tuple(round(max(0.05, min(10.0, float(w))), 3) for w in (data.get("synapse_weights") or [1.05] * n_src)[:n_src])
-        v_th = max(0.2, min(20.0, float(data.get("v_threshold", pool.v_threshold))))
+        counts = tuple(max(1, min(10000, int(c))) for c in (data.get("synapse_counts") or [1] * n_src)[:n_src])
+        og = data.get("outgoing_synapses_per_fim")
+        out_quota = int(og) if (og is not None and str(og).strip() != "" and int(og) > 0) else None
         cw = data.get("custom_window_ms")
         custom_win = int(cw) if (cw is not None and str(cw).strip() != "" and int(cw) > 0) else None
 
@@ -967,8 +1049,7 @@ class InstinctNetwork:
             training_context=str(data.get("training_context", "Ручное создание")),
             training_stage=str(data.get("training_stage", "Инженерный конструктор")),
             synapse_counts=counts,
-            synapse_weights=weights,
-            v_threshold=v_th,
+            outgoing_synapses_per_fim=out_quota,
             custom_window_ms=custom_win,
         )
         fim.decoded_text = "".join(self.decode_fim(level - 1, s) for s in sources)
@@ -999,16 +1080,27 @@ class InstinctNetwork:
         fim.decoded_text = "".join(self.decode_fim(level - 1, src) for src in fim.sources)
         return fim.decoded_text
 
-    def summary(self) -> Dict[int, Dict[str, int]]:
-        stats: Dict[int, Dict[str, int]] = {}
+    def summary(self) -> Dict[int, Dict[str, Any]]:
+        metrics = self._compute_synapse_metrics()
+        per_lvl = metrics["per_lvl"]
+        stats: Dict[int, Dict[str, Any]] = {}
         for lvl, pool in self.levels.items():
-            cons_fims = [f for f in pool.fims if f.consolidated]
+            m = per_lvl[lvl]
+            out_tot = per_lvl[lvl + 1]["actual_in_total"] if lvl < self.num_levels else 0
             stats[lvl] = {
                 "window_ms": pool.window_ms,
                 "max_fims": pool.max_fims,
                 "allocated_fims": len(pool.fims),
-                "consolidated_fims": len(cons_fims),
-                "total_recognitions": sum(f.recognitions for f in cons_fims),
+                "consolidated_fims": m["consolidated_fims"],
+                "two_synapse_fims": m["two_synapse_fims"],
+                "three_synapse_fims": m["three_synapse_fims"],
+                "total_recognitions": m["total_recognitions"],
+                "actual_in_b1": m["actual_in_b1"],
+                "actual_in_b2": m["actual_in_b2"],
+                "actual_in_b3": m["actual_in_b3"],
+                "actual_in_total": m["actual_in_total"],
+                "actual_out_total": out_tot,
+                "synapses_per_fim_out": pool.synapses_per_fim_out,
             }
         return stats
 
