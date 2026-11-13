@@ -1,6 +1,10 @@
 """
-Веб-интерфейс и инженерный стенд ФИМ-Nengo для проверки, трассировки
-каждой последовательности, спайковой визуализации и инспекции памяти (до 10 млн ФИМ).
+Веб-версия классического инженерного стенда Nengo-FIM Simulator:
+- Полная настройка параметров спайковой сети, каждого уровня (L1..L9)
+  и каждого отдельного ФИМа (число синапсов Б1/Б2/Б3, веса, пороги V_th, окна W_L);
+- Классический научный интерфейс в стиле Nengo GUI (белые графики, схема ансамблей,
+  спайковый растр, осциллограф мембранных потенциалов V(t), трассировка последовательностей);
+- Пул памяти 10 000 000 ФИМ (по 1 млн на уровень), обучение на корпусе русского языка.
 
 Запуск:
     python3 fim_ui.py
@@ -48,6 +52,7 @@ def analyze_input(text: str, learn: bool = False) -> Dict[str, Any]:
             "substring_matches": {},
             "simulation": None,
             "summary": NET.summary(),
+            "config": NET.get_config(),
         }
 
     raw_events = (
@@ -142,6 +147,7 @@ def analyze_input(text: str, learn: bool = False) -> Dict[str, Any]:
         "substring_matches": substring_matches,
         "simulation": simulation,
         "summary": NET.summary(),
+        "config": NET.get_config(),
     }
 
 
@@ -178,6 +184,11 @@ def get_level_fims(level: int, limit: int = 80, query: str = "") -> Dict[str, An
             "text": f.decoded_text or NET.decode_fim(level, f.fim_id),
             "recognitions": f.recognitions,
             "synapse_slots": list(f.synapse_slots),
+            "synapse_counts": list(f.get_counts()),
+            "synapse_weights": [round(w, 3) for w in f.get_weights()],
+            "v_threshold": round(f.v_threshold, 3),
+            "window_ms": f.effective_window_ms(pool.window_ms),
+            "sources": list(f.sources),
             "created_at_ms": f.created_at_ms,
             "training_context": f.training_context,
             "training_stage": f.training_stage,
@@ -198,1339 +209,1592 @@ HTML_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ФИМ-Nengo Studio — Спайковый симулятор и трассировщик (10M)</title>
+  <title>Nengo-FIM Workbench — Настройка синапсов и спайковая симуляция (10M)</title>
   <style>
     :root {
-      --bg: #070b14;
-      --panel: #0d1424;
-      --panel-2: #111a2e;
-      --border: #1e293b;
-      --border-hi: #334155;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-      --cyan: #38bdf8;
-      --green: #4ade80;
-      --amber: #fbbf24;
-      --red: #f87171;
-      --violet: #c084fc;
-      --mono: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+      --desk-bg: #dde2ea;
+      --pane-bg: #f4f6f9;
+      --surface: #ffffff;
+      --toolbar: #2b313a;
+      --toolbar-border: #1e232a;
+      --border: #b6c0ce;
+      --grid-line: #dce1ea;
+      --text: #181c22;
+      --muted: #556070;
+      --accent: #1d5fbf;
+      --accent-hover: #174da0;
+      --ok: #157347;
+      --warn: #b45309;
+      --danger: #b91c1c;
+      --mono: "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace;
+      --sans: "Segoe UI", Tahoma, Arial, sans-serif;
     }
     * { box-sizing: border-box; }
-    body {
+    html, body {
       margin: 0;
-      background: var(--bg);
+      padding: 0;
+      background: var(--desk-bg);
       color: var(--text);
-      font-family: Inter, system-ui, -apple-system, sans-serif;
-      font-size: 13px;
-      line-height: 1.45;
+      font-family: var(--sans);
+      font-size: 12px;
+      line-height: 1.35;
     }
-    .topbar {
-      background: #0b1120;
-      border-bottom: 1px solid var(--border);
-      padding: 10px 18px;
+
+    /* Classic Nengo Top Toolbar */
+    .nengo-toolbar {
+      background: var(--toolbar);
+      color: #f1f5f9;
+      border-bottom: 2px solid var(--toolbar-border);
+      padding: 6px 12px;
       display: flex;
       flex-wrap: wrap;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
       gap: 10px;
       position: sticky;
       top: 0;
-      z-index: 30;
+      z-index: 50;
     }
-    .brand {
+    .tb-left {
       display: flex;
       align-items: center;
       gap: 10px;
+    }
+    .tb-title {
       font-weight: 700;
-      font-size: 15px;
-      letter-spacing: -0.01em;
-    }
-    .brand-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: var(--cyan);
-      box-shadow: 0 0 10px var(--cyan);
-    }
-    .metrics-strip {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      font-family: var(--mono);
-      font-size: 11.5px;
-    }
-    .metric-chip {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 4px 9px;
-      color: var(--muted);
-    }
-    .metric-chip b { color: var(--text); }
-    .metric-chip.accent b { color: var(--cyan); }
-    .metric-chip.green b { color: var(--green); }
-
-    .workspace {
-      max-width: 1620px;
-      margin: 0 auto;
-      padding: 14px 18px 36px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px 14px;
-    }
-    .panel-header {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 10px;
-      padding-bottom: 7px;
-      border-bottom: 1px solid var(--border);
-    }
-    .panel-title {
-      font-size: 12.5px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: var(--cyan);
-    }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-
-    textarea, input[type="text"] {
-      background: #060911;
-      color: var(--text);
-      border: 1px solid var(--border-hi);
-      border-radius: 6px;
-      padding: 8px 10px;
-      font-family: var(--mono);
       font-size: 13px;
+      letter-spacing: 0.02em;
+      color: #ffffff;
     }
-    textarea { width: 100%; min-height: 54px; resize: vertical; }
-    textarea:focus, input[type="text"]:focus {
-      outline: none;
-      border-color: var(--cyan);
+    .tb-sub {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #b7c3d4;
+      border-left: 1px solid #485262;
+      padding-left: 10px;
     }
+    .tb-transport {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+      background: #1f242b;
+      border: 1px solid #454f5e;
+      padding: 3px 6px;
+    }
+    .tb-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .tb-stat {
+      background: #1f242b;
+      border: 1px solid #454f5e;
+      padding: 3px 7px;
+      color: #d6dfeb;
+    }
+    .tb-stat b { color: #7cc4ff; }
+
+    /* Buttons & Inputs: flat classic engineering style */
     button {
-      background: #0284c7;
-      color: #fff;
-      border: 1px solid #0369a1;
-      border-radius: 6px;
-      padding: 6px 12px;
-      font-size: 12.5px;
+      font-family: var(--sans);
+      font-size: 11.5px;
       font-weight: 600;
+      padding: 4px 9px;
+      border: 1px solid #96a2b3;
+      background: #eceff4;
+      color: #181c22;
+      border-radius: 2px;
       cursor: pointer;
     }
-    button:hover { background: #0ea5e9; }
-    button.sec {
-      background: #0f172a;
-      color: var(--text);
-      border: 1px solid var(--border-hi);
+    button:hover { background: #dfe5ee; border-color: #6b788b; }
+    button.primary {
+      background: var(--accent);
+      border-color: #13448c;
+      color: #ffffff;
     }
-    button.sec:hover { border-color: var(--cyan); color: var(--cyan); }
-    button.sec.active {
-      background: #0c4a6e;
-      border-color: var(--cyan);
-      color: #fff;
+    button.primary:hover { background: var(--accent-hover); }
+    button.good {
+      background: #1e7e4f;
+      border-color: #145b38;
+      color: #ffffff;
     }
-
-    .transport {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-      background: #060911;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 7px 10px;
-      margin-top: 8px;
-      font-family: var(--mono);
-      font-size: 12px;
+    button.good:hover { background: #18663f; }
+    button.danger {
+      background: #c53030;
+      border-color: #9b2222;
+      color: #ffffff;
     }
-    .transport button { padding: 4px 10px; font-size: 12px; }
-    .clock-pill {
-      background: #0f172a;
-      border: 1px solid var(--border-hi);
-      border-radius: 5px;
-      padding: 3px 8px;
-      color: var(--cyan);
-    }
-
-    .readout-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-    @media (max-width: 960px) { .readout-grid { grid-template-columns: 1fr; } }
-    .readout-box {
-      background: #060911;
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--cyan);
-      border-radius: 6px;
-      padding: 10px 12px;
-    }
-    .readout-box.recall { border-left-color: var(--green); }
-    .readout-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .readout-main {
-      font-size: 17px;
-      font-weight: 700;
+    button.danger:hover { background: #9b2222; }
+    button.dark-btn {
+      background: #3a424e;
+      border-color: #5a6575;
       color: #f8fafc;
-      margin: 4px 0;
-      word-break: break-word;
+      padding: 3px 8px;
+    }
+    button.dark-btn:hover { background: #4b5563; }
+    button.tab-btn.active {
+      background: var(--accent);
+      border-color: #13448c;
+      color: #ffffff;
     }
 
-    .two-col {
+    input[type="text"], input[type="number"], select, textarea {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #9ba6b7;
+      border-radius: 2px;
+      padding: 3px 6px;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 1px rgba(29,95,191,0.2);
+    }
+
+    /* 3-Column Desktop Workbench */
+    .workbench {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
+      grid-template-columns: 350px minmax(520px, 1fr) 390px;
+      gap: 6px;
+      padding: 6px;
+      min-height: calc(100vh - 46px);
+      align-items: start;
     }
-    @media (max-width: 1080px) { .two-col { grid-template-columns: 1fr; } }
+    @media (max-width: 1280px) {
+      .workbench { grid-template-columns: 330px 1fr; }
+      .right-dock { grid-column: 1 / -1; }
+    }
+    @media (max-width: 860px) {
+      .workbench { grid-template-columns: 1fr; }
+    }
 
-    .canvas-wrap {
-      background: #05080f;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px;
+    .col {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
     }
-    .canvas-head {
+    .win {
+      background: var(--pane-bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+    .win-head {
+      background: #e2e7ef;
+      border-bottom: 1px solid var(--border);
+      padding: 5px 8px;
       display: flex;
       flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
       gap: 6px;
-      margin-bottom: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      color: #cbd5e1;
     }
-    canvas {
-      width: 100%;
-      display: block;
-      background: #03060c;
-      border-radius: 4px;
-      cursor: crosshair;
-    }
-    .legend { font-size: 11px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; font-family: var(--mono); }
-
-    .trace-scroll {
-      max-height: 350px;
-      overflow: auto;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: #060911;
-    }
-    table.trace-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-    }
-    table.trace-table th {
-      position: sticky;
-      top: 0;
-      background: #0b1120;
-      color: var(--muted);
-      font-size: 11px;
+    .win-title {
+      font-weight: 700;
+      font-size: 11.5px;
+      color: #1e242c;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      text-align: left;
-      padding: 7px 9px;
-      border-bottom: 1px solid var(--border-hi);
-      z-index: 2;
+      letter-spacing: 0.03em;
     }
-    table.trace-table td {
-      padding: 6px 9px;
-      border-bottom: 1px solid #111827;
-      vertical-align: top;
+    .win-body {
+      padding: 8px;
     }
-    table.trace-table tr { cursor: pointer; }
-    table.trace-table tbody tr:hover { background: #101b33; }
-    table.trace-table tbody tr.selected {
-      background: #0c2749;
-      outline: 1px solid var(--cyan);
-    }
-    table.trace-table tbody tr.future { opacity: 0.42; }
 
-    .badge {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 600;
-      border: 1px solid transparent;
-      white-space: nowrap;
-    }
-    .badge.rec { background: rgba(74,222,128,0.12); color: var(--green); border-color: rgba(74,222,128,0.35); }
-    .badge.p23 { background: rgba(251,191,36,0.12); color: var(--amber); border-color: rgba(251,191,36,0.35); }
-    .badge.cons { background: rgba(56,189,248,0.12); color: var(--cyan); border-color: rgba(56,189,248,0.35); }
-    .badge.inst { background: rgba(248,113,113,0.15); color: var(--red); border-color: rgba(248,113,113,0.4); }
-
-    .slot-chip {
-      display: inline-block;
-      padding: 2px 6px;
-      margin: 1px 4px 1px 0;
-      border-radius: 4px;
-      font-family: var(--mono);
-      font-size: 11px;
-      border: 1px solid #1e293b;
-      background: #0b1220;
-      color: #cbd5e1;
-      cursor: pointer;
-    }
-    .slot-chip.hit { border-color: rgba(56,189,248,0.45); color: #bae6fd; }
-    .slot-chip.miss { border-color: rgba(251,191,36,0.35); color: #94a3b8; text-decoration: line-through; }
-    .slot-chip:hover { border-color: var(--cyan); }
-
-    .lvl-grid {
+    /* Parameter Forms */
+    .param-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 7px;
-      margin-bottom: 10px;
+      grid-template-columns: 1fr 86px;
+      gap: 5px 8px;
+      align-items: center;
     }
-    .lvl-card {
-      background: #060911;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 7px 9px;
-      cursor: pointer;
-      font-family: var(--mono);
+    .param-grid label {
+      color: #27303c;
       font-size: 11.5px;
     }
-    .lvl-card:hover, .lvl-card.active { border-color: var(--cyan); background: #0c172b; }
-    .lvl-card .lvl-head { font-weight: 700; color: var(--cyan); margin-bottom: 3px; display: flex; justify-content: space-between; }
-
-    .tree-box {
-      max-height: 430px;
-      overflow: auto;
-      background: #060911;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px;
+    .param-grid input[type="number"], .param-grid select {
+      width: 100%;
+      text-align: right;
     }
-    .tree-node {
-      margin-left: 16px;
-      padding-left: 10px;
-      border-left: 1px solid #334155;
-      margin-top: 5px;
-      font-size: 12px;
-    }
-    .tree-head {
-      background: #0d1526;
-      border: 1px solid #263449;
-      border-radius: 5px;
-      padding: 4px 8px;
-      display: inline-block;
-      cursor: pointer;
-    }
-    .tree-head:hover { border-color: var(--cyan); }
-
-    .fim-list {
-      max-height: 320px;
-      overflow: auto;
+    .chk-row {
       display: flex;
-      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      margin: 6px 0;
+      font-size: 11.5px;
+      color: #1f2730;
+    }
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
       gap: 5px;
+      align-items: center;
     }
-    .fim-item {
-      background: #060911;
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      font-size: 11.5px;
+    }
+    th, td {
+      border: 1px solid var(--grid-line);
+      padding: 4px 6px;
+      text-align: left;
+      vertical-align: middle;
+    }
+    th {
+      background: #ebeff5;
+      color: #27303c;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    td input[type="number"], td input[type="text"], td select {
+      width: 100%;
+      padding: 2px 4px;
+      font-size: 11px;
+    }
+    tr.clickable:hover { background: #eef4fc; cursor: pointer; }
+    tr.selected-row { background: #dceafb !important; }
+    .scroll-box {
+      max-height: 270px;
+      overflow-y: auto;
       border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 7px 9px;
-      cursor: pointer;
-      font-size: 12px;
+      background: #ffffff;
     }
-    .fim-item:hover { border-color: var(--cyan); background: #0d172a; }
+    .scroll-tall {
+      max-height: 360px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      background: #ffffff;
+    }
+
+    /* Center Plots & Nengo Schematic */
+    .probe-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    @media (max-width: 1050px) {
+      .probe-grid { grid-template-columns: 1fr; }
+    }
+    canvas.nengo-canvas {
+      display: block;
+      width: 100%;
+      background: #ffffff;
+      border: 1px solid var(--border);
+    }
+    .readout-strip {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .readout-box {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      padding: 6px 8px;
+    }
+    .readout-label {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .readout-val {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 700;
+      margin-top: 2px;
+      color: #111827;
+      word-break: break-word;
+    }
+
+    /* Tags & Badges */
+    .tag {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      padding: 1px 5px;
+      border: 1px solid #b6c0ce;
+      background: #f1f4f8;
+      border-radius: 2px;
+      margin: 1px 2px 1px 0;
+    }
+    .tag.hit { background: #e6f4ea; border-color: #6ab586; color: #0f5132; }
+    .tag.miss { background: #fff4e5; border-color: #d99b42; color: #7c3f00; text-decoration: line-through; }
+    .tag.assoc { background: #fff3cd; border-color: #e0b137; color: #7a5200; }
     .mono { font-family: var(--mono); }
-    .muted { color: var(--muted); }
+    .muted { color: var(--muted); font-size: 11px; }
+    .status-msg {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 6px;
+      margin-top: 6px;
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      display: none;
+    }
+    .status-msg.show { display: block; }
+    .status-msg.ok { border-color: #5ca97a; background: #edf7f0; color: #14532d; }
+    .status-msg.err { border-color: #d96b6b; background: #fdf2f2; color: #7f1d1d; }
+
+    /* Decomposition tree */
+    .tree-node {
+      margin-left: 12px;
+      padding-left: 8px;
+      border-left: 1px solid #9ba6b7;
+      margin-top: 4px;
+    }
+    .tree-root { margin-left: 0; border-left: none; padding-left: 0; }
+    .tree-card {
+      background: #ffffff;
+      border: 1px solid var(--grid-line);
+      padding: 4px 6px;
+      cursor: pointer;
+    }
+    .tree-card:hover { border-color: var(--accent); background: #f3f7fd; }
   </style>
 </head>
 <body>
 
-<div class="topbar">
-  <div class="brand">
-    <span class="brand-dot"></span>
-    <span>ФИМ-Nengo Studio · Иерархическая спайковая сеть (L0–L9)</span>
+<div class="nengo-toolbar">
+  <div class="tb-left">
+    <div class="tb-title">Nengo-FIM Workbench</div>
+    <div class="tb-sub">Симулятор и конструктор спайковой памяти ФИМ (пул 10M, L0–L9)</div>
   </div>
-  <div class="metrics-strip">
-    <div class="metric-chip accent">Ёмкость пула: <b id="hdrCap">1 000 000 ФИМ / ур. (10M сеть)</b></div>
-    <div class="metric-chip green">Консолидировано: <b id="hdrTotalCons">—</b></div>
-    <div class="metric-chip">Узнаваний в базе: <b id="hdrTotalRec">—</b></div>
-    <div class="metric-chip">Такт L0: <b>84 мс</b> · Инстинкт: <b>252 мс</b> · Порог: <b>V_th = 2.0</b></div>
+  <div class="tb-transport">
+    <button class="dark-btn" onclick="resetPlayhead()" title="В начало (0 мс)">|&lt;&lt;</button>
+    <button class="dark-btn" onclick="stepPlayhead(-1)" title="Назад на 1 такт">-Такт</button>
+    <button class="dark-btn" id="playPauseBtn" onclick="togglePlay()">&#9654; Пуск</button>
+    <button class="dark-btn" onclick="stepPlayhead(1)" title="Вперёд на 1 такт">+Такт</button>
+    <input type="range" id="timeSlider" min="0" max="252" step="12" value="252" oninput="scrubTime(this.value)" style="width:140px;" />
+    <span class="mono" id="clockLabel" style="color:#7cc4ff; min-width:85px;">t = 0 мс</span>
+    <select id="speedSelect" style="background:#2b313a; color:#f1f5f9; border-color:#525d6d;">
+      <option value="0.25">0.25x</option>
+      <option value="0.5" selected>0.5x</option>
+      <option value="1">1.0x</option>
+      <option value="2">2.0x</option>
+    </select>
+  </div>
+  <div class="tb-stats">
+    <div class="tb-stat">ФИМ в памяти: <b id="statTotalFims">—</b> / 9 000 000</div>
+    <div class="tb-stat">Такт L0: <b id="statTickMs">84 мс</b></div>
+    <div class="tb-stat">Инстинкт: <b id="statInstinctMs">252 мс</b></div>
+    <div class="tb-stat">V_th: <b id="statVth">2.00</b></div>
   </div>
 </div>
 
-<div class="workspace">
-
-  <!-- Блок ввода и Nengo-транспорта -->
-  <div class="panel">
-    <div class="panel-header">
-      <div class="panel-title">Входной поток (Уровень 0: 41 элемент) &amp; Транспорт симуляции Nengo</div>
-      <div class="row">
-        <button class="sec" onclick="setExample('привет')">привет</button>
-        <button class="sec" onclick="setExample('ну привет')">ну привет</button>
-        <button class="sec" onclick="setExample('мама мыла раму')">мама мыла раму</button>
-        <button class="sec" onclick="setExample('мама раму')">мама раму (2-из-3)</button>
-        <button class="sec" onclick="setExample('дом у берега')">дом у берега</button>
-        <button class="sec" onclick="setExample('Только Иван выразил готовность помочь.')">RuCoLA #1</button>
-        <button class="sec" onclick="setExample('На поверку вся теория оказалась полной чепухой.')">RuCoLA #2</button>
+<div class="workbench">
+  <!-- LEFT DOCK: Global Network Config, Level Configs, FIM Memory Explorer -->
+  <div class="col left-dock">
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">1. Параметры спайковой сети и синапсов</span>
       </div>
-    </div>
-    <textarea id="inputText" placeholder="Введите фразу или предложение для потактовой трассировки спайков..."></textarea>
-    <div class="row" style="margin-top:8px;">
-      <button onclick="sendText(false)">▶ Проверить и трассировать (Read-Only)</button>
-      <button class="sec" onclick="sendText(true)">+ Подать в память и дообучить</button>
-      <span id="latencyBadge" class="mono muted" style="font-size:11.5px;"></span>
-    </div>
+      <div class="win-body">
+        <div class="param-grid">
+          <label for="cfgMinSyn">Мин. синапсов на ФИМ (шт.):</label>
+          <select id="cfgMinSyn"><option value="2">2</option><option value="3">3</option></select>
 
-    <div class="transport">
-      <button class="sec" onclick="simSeek(0)" title="В начало">⏮</button>
-      <button class="sec" onclick="simStep(-84)" title="Назад на 1 такт (-84 мс)">⏪ -84мс</button>
-      <button onclick="simPlay()">▶ Пуск</button>
-      <button class="sec" onclick="simPause()">⏸ Пауза</button>
-      <button class="sec" onclick="simStep(84)" title="Вперёд на 1 такт (+84 мс)">⏩ +84мс</button>
-      <button class="sec" onclick="simEnd()" title="В конец">⏭ В конец</button>
-      <select id="simSpeed" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:4px 6px;font-family:var(--mono);font-size:11.5px;">
-        <option value="0.35">0.35x</option>
-        <option value="1" selected>1.0x</option>
-        <option value="2">2.0x</option>
-      </select>
-      <input type="range" id="simScrub" min="0" max="504" step="12" value="0" style="flex:1;min-width:160px;" oninput="onScrub(this.value)" />
-      <span class="clock-pill" id="simClock">t = 0 / 0 мс</span>
-      <span class="clock-pill" id="simTicks">Такт L0: 0 · Инстинкт: 0</span>
-    </div>
-  </div>
+          <label for="cfgMaxSyn">Макс. синапсов на ФИМ (шт.):</label>
+          <select id="cfgMaxSyn"><option value="3">3</option><option value="2">2</option></select>
 
-  <!-- Ответ системы (прямой вывод и подъём) -->
-  <div class="readout-grid">
-    <div class="readout-box">
-      <div class="readout-label">Максимально узнанная конструкция на входе</div>
-      <div id="topAnswerMain" class="readout-main muted">Подайте текст или выберите пример выше</div>
-      <div id="topAnswerMeta" class="mono muted" style="font-size:11.5px;"></div>
-    </div>
-    <div class="readout-box recall">
-      <div class="readout-label">Ассоциативный подъём по исходящим синапсам (верхний контекст)</div>
-      <div id="recallMain" class="readout-main muted">—</div>
-      <div id="recallMeta" class="mono muted" style="font-size:11.5px;"></div>
-    </div>
-  </div>
+          <label for="cfgDefCount">Синапсов на 1 вход БН (шт.):</label>
+          <input type="number" id="cfgDefCount" min="1" max="32" step="1" value="1" />
 
-  <!-- 1. Таблица трассировки каждой последовательности -->
-  <div class="panel">
-    <div class="panel-header">
-      <div class="panel-title">1. Хронологическая трассировка каждой последовательности (Б1 + Б2 + Б3 → Г)</div>
-      <div class="row">
-        <div id="traceFilterBar" class="row"></div>
-        <label class="mono muted" style="font-size:11.5px;display:flex;align-items:center;gap:5px;cursor:pointer;">
-          <input type="checkbox" id="chkShowAllTimes" checked onchange="renderTraceTable()" /> Показать весь поток (включая будущие шаги)
-        </label>
-      </div>
-    </div>
-    <div class="trace-scroll">
-      <table class="trace-table">
-        <thead>
-          <tr>
-            <th style="width:110px;">Время / Такт</th>
-            <th style="width:105px;">Уровень / Окно</th>
-            <th style="width:125px;">Тип срабатывания</th>
-            <th style="width:220px;">ФИМ и распознанный текст</th>
-            <th>Формула сборки (синапсы Б1, Б2, Б3 от предыдущего уровня)</th>
-            <th style="width:190px;">Источник в корпусе</th>
-          </tr>
-        </thead>
-        <tbody id="traceBody">
-          <tr><td colspan="6" class="muted" style="padding:14px;">Нет данных симуляции. Запустите проверку текста.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
+          <label for="cfgDefWeight">Вес одного синапса w:</label>
+          <input type="number" id="cfgDefWeight" min="0.05" max="10" step="0.05" value="1.05" />
 
-  <!-- 2. Каскадный граф последовательностей (DAG + LIF Ансамбль) -->
-  <div class="panel">
-    <div class="panel-header">
-      <div class="panel-title">2. Причинный граф каскада спайков (L0 → L1 → … → L9) &amp; LIF-ансамбль целевого ФИМ</div>
-      <span id="simTargetBadge" class="mono" style="font-size:11.5px;color:#7dd3fc;">Цель осциллографа: —</span>
-    </div>
-    <div class="canvas-wrap">
-      <div class="canvas-head">
-        <span>Кликните по любому узлу графа, чтобы переключить осциллограф и дерево синапсов на этот ФИМ</span>
-        <span class="legend">
-          <span style="color:#f87171;">● Импульс инстинкта 252 мс</span>
-          <span style="color:#38bdf8;">● Базовый нейрон Б</span>
-          <span style="color:#4ade80;">● Полный спайк (1.0)</span>
-          <span style="color:#fbbf24;">● Ассоциация 2-из-3 (0.67)</span>
-        </span>
-      </div>
-      <canvas id="networkCanvas" style="height:290px;"></canvas>
-    </div>
-  </div>
+          <label for="cfgDefVth">Порог головного нейрона V_th:</label>
+          <input type="number" id="cfgDefVth" min="0.2" max="20" step="0.05" value="2.00" />
 
-  <!-- 3. Растр спайков и Осциллограф V(t) -->
-  <div class="two-col">
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">3А. Многоканальный растр спайков (Инстинкт 252 мс + L0..L9)</div>
-      </div>
-      <div class="canvas-wrap">
-        <canvas id="rasterCanvas" style="height:255px;"></canvas>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">3Б. Осциллограф мембранных потенциалов V(t) целевого ФИМ</div>
-        <div id="oscVoltagesReadout" class="mono" style="font-size:11.5px;">V_Б1=0.00 V_Б2=0.00 V_Б3=0.00 | V_Г=0.00 / 2.00</div>
-      </div>
-      <div class="canvas-wrap">
-        <div class="canvas-head">
-          <span class="legend">
-            <span style="color:#60a5fa;">— V_Б1</span>
-            <span style="color:#c084fc;">— V_Б2</span>
-            <span style="color:#34d399;">— V_Б3</span>
-            <span style="color:#fbbf24;">— V_Г (головной)</span>
-            <span style="color:#f87171;">--- V_th = 2.0</span>
-          </span>
+          <label for="cfgTickMs">Такт уровня L0 (мс):</label>
+          <input type="number" id="cfgTickMs" min="12" max="1000" step="12" value="84" />
+
+          <label for="cfgInstinctMs">Цикл инстинкта (мс):</label>
+          <input type="number" id="cfgInstinctMs" min="24" max="5000" step="12" value="252" />
+
+          <label for="cfgDtMs">Шаг интегратора dt (мс):</label>
+          <input type="number" id="cfgDtMs" min="1" max="84" step="1" value="12" />
+
+          <label for="cfgTau">Коэфф. утечки мембраны τ:</label>
+          <input type="number" id="cfgTau" min="0.1" max="20" step="0.1" value="1.4" />
+
+          <label for="cfgL2Chars">Макс. символов слова (L2):</label>
+          <input type="number" id="cfgL2Chars" min="2" max="18" step="1" value="6" />
         </div>
-        <canvas id="oscCanvas" style="height:230px;"></canvas>
+        <label class="chk-row">
+          <input type="checkbox" id="cfgAssoc23" checked />
+          Разрешить ассоциативное узнавание 2-из-3 синапсов
+        </label>
+        <label class="chk-row">
+          <input type="checkbox" id="cfgApplyExisting" checked />
+          Применить веса, кол-во и V_th ко всем ФИМ сети
+        </label>
+        <div class="btn-row">
+          <button class="primary" onclick="saveGlobalConfig()">Применить и пересчитать</button>
+          <button onclick="loadConfig()">Сбросить к текущим</button>
+        </div>
+        <div id="globalCfgStatus" class="status-msg"></div>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">2. Параметры уровней (L1–L9, пул 1M/ур.)</span>
+        <button onclick="saveLevelConfigs()">Сохранить окна W_L и пороги</button>
+      </div>
+      <div class="win-body" style="padding:4px;">
+        <div class="scroll-box" style="max-height:245px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Ур.</th>
+                <th>Окно W_L (мс)</th>
+                <th>V_th</th>
+                <th>ФИМ в памяти</th>
+              </tr>
+            </thead>
+            <tbody id="levelsConfigBody"></tbody>
+          </table>
+        </div>
+        <div id="levelCfgStatus" class="status-msg"></div>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">3. База ФИМ уровня L<span id="memCurLvl">3</span></span>
+        <span class="mono muted" id="memCountInfo">—</span>
+      </div>
+      <div class="win-body">
+        <div class="btn-row" id="levelTabs" style="margin-bottom:6px;"></div>
+        <div class="btn-row" style="margin-bottom:6px;">
+          <input type="text" id="memSearch" placeholder="Поиск текста или #ID..." style="flex:1;" oninput="searchCurrentLevel()" />
+          <button onclick="searchCurrentLevel()">Найти</button>
+        </div>
+        <div class="scroll-box" style="max-height:290px;">
+          <table>
+            <thead>
+              <tr>
+                <th>#ID</th>
+                <th>Текст ФИМ</th>
+                <th>Син.</th>
+                <th>V_th</th>
+                <th>Узн.</th>
+              </tr>
+            </thead>
+            <tbody id="memListBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- 4. Полное дерево синапсов и Поиск по корпусу (1 000 000 ФИМ / уровень) -->
-  <div class="two-col">
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">4А. Структурное дерево сборки ФИМ (до букв L0) и исходящие связи</div>
+  <!-- CENTER WORKSPACE: Input Stream, Nengo Schematic, Probes (Raster + V(t)), Trace Table -->
+  <div class="col center-pane">
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">Входной поток элементов (L0 = 41 символ, такт <span id="hdrTick">84</span> мс)</span>
+        <span class="mono muted" id="latencyBadge">Готов</span>
       </div>
-      <div id="analyticsBox" class="tree-box muted">Выберите любую строку в таблице трассировки, узел графа или ФИМ в базе памяти.</div>
+      <div class="win-body">
+        <textarea id="inputText" rows="2" placeholder="Введите слово, фразу или предложение...">мама раму</textarea>
+        <div class="btn-row" style="margin-top:6px;">
+          <button class="primary" onclick="sendText(false)">Запустить симуляцию (Проверка)</button>
+          <button class="good" onclick="sendText(true)">Подать с обучением (+ Записать ФИМ)</button>
+          <button onclick="setExample('мама мыла раму')">мама мыла раму</button>
+          <button onclick="setExample('мама раму')">мама раму (2 из 3)</button>
+          <button onclick="setExample('дом у берега')">дом у берега</button>
+          <button onclick="setExample('Только Иван выразил готовность помочь.')">Корпус RuCoLA</button>
+        </div>
+        <div class="readout-strip">
+          <div class="readout-box">
+            <div class="readout-label">Узнавание на верхнем активном уровне</div>
+            <div class="readout-val" id="topAnswerMain">—</div>
+            <div id="topAnswerMeta" style="margin-top:3px;"></div>
+          </div>
+          <div class="readout-box">
+            <div class="readout-label">Всплытие вверх по исходящим синапсам (достройка)</div>
+            <div class="readout-val" id="recallMain">—</div>
+            <div id="recallMeta" style="margin-top:3px;"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">4Б. Инспектор пула памяти (1 000 000 ФИМ на уровень · Корпус СЧР + RuCoLA)</div>
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">Схема ансамбля Nengo и синапсов активного ФИМа (клик по узлу — выбор ФИМа)</span>
+        <span class="mono muted" id="dagFocusLabel">Нет выбранного модуля</span>
       </div>
-      <div id="summaryGrid" class="lvl-grid"></div>
-      <div class="row" style="margin-bottom:8px;">
-        <input type="text" id="levelSearchInput" placeholder="Поиск подстроки или #ID на выбранном уровне..." style="flex:1;" onkeydown="if(event.key==='Enter') searchActiveLevel()" />
-        <button onclick="searchActiveLevel()">Найти</button>
-        <button class="sec" onclick="document.getElementById('levelSearchInput').value=''; searchActiveLevel()">Сброс</button>
+      <div class="win-body" style="padding:6px;">
+        <canvas id="dagCanvas" class="nengo-canvas" height="235"></canvas>
       </div>
-      <div id="levelBrowser" class="fim-list">
-        <div class="muted" style="padding:10px;">Нажмите на карточку уровня (1–9) выше, чтобы просмотреть или найти ФИМы в памяти.</div>
+    </div>
+
+    <div class="probe-grid">
+      <div class="win">
+        <div class="win-head">
+          <span class="win-title">Nengo Probe: Спайковый растр (L0..L9 + Инстинкт)</span>
+          <span class="mono muted" id="rasterMeta">—</span>
+        </div>
+        <div class="win-body" style="padding:6px;">
+          <canvas id="rasterCanvas" class="nengo-canvas" height="220"></canvas>
+        </div>
+      </div>
+
+      <div class="win">
+        <div class="win-head">
+          <span class="win-title">Nengo Probe: Осциллограф V(t) нейронов Б1, Б2, Б3 и Г</span>
+          <span class="mono" id="oscReadout" style="color:#1d5fbf; font-size:11px;">V_Г=0.00 / V_th=2.00</span>
+        </div>
+        <div class="win-body" style="padding:6px;">
+          <canvas id="oscCanvas" class="nengo-canvas" height="220"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">Трассировка каждой последовательности: Б1 + Б2 + Б3 &rarr; Г (<span id="traceCount">0</span> срабатываний)</span>
+        <div class="btn-row">
+          <div class="btn-row" id="traceLevelFilters"></div>
+          <input type="text" id="traceFilterInput" placeholder="Фильтр текста..." oninput="renderTraceTable()" style="width:140px;" />
+        </div>
+      </div>
+      <div class="win-body" style="padding:4px;">
+        <div class="scroll-tall">
+          <table>
+            <thead>
+              <tr>
+                <th>t (мс)</th>
+                <th>Ур. / #ID</th>
+                <th>Текст ФИМ</th>
+                <th>Синапсы Б1 + Б2 + Б3 (источник · кол-во · вес)</th>
+                <th>Окно / V_th</th>
+                <th>Режим</th>
+                <th>Настройка</th>
+              </tr>
+            </thead>
+            <tbody id="traceBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
 
+  <!-- RIGHT DOCK: Per-FIM Synapse & Threshold Editor + Hierarchy Tree -->
+  <div class="col right-dock">
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title" id="editorTitle">Редактор ФИМа (выберите ФИМ)</span>
+        <button onclick="openNewFimMode()">+ Создать новый ФИМ</button>
+      </div>
+      <div class="win-body">
+        <div class="param-grid" style="grid-template-columns: 1fr 120px;">
+          <label for="edLevel">Уровень (L1–L9):</label>
+          <select id="edLevel"></select>
+
+          <label for="edFimId">ID модуля:</label>
+          <input type="text" id="edFimId" readonly value="—" style="background:#eef1f6;" />
+
+          <label>Декодированный текст:</label>
+          <div id="edDecodedText" class="mono" style="font-weight:700; color:#1d5fbf; text-align:right; overflow:hidden; text-overflow:ellipsis;">—</div>
+
+          <label for="edSynMode">Число активных слотов ФИМа:</label>
+          <select id="edSynMode" onchange="toggleB2Slot()">
+            <option value="3">3 синапса (Б1, Б2, Б3)</option>
+            <option value="2">2 синапса (Б1, Б3)</option>
+          </select>
+        </div>
+
+        <div style="margin-top:8px; font-weight:700; font-size:11px; color:#27303c; text-transform:uppercase;">
+          Синапсы базовых нейронов (источник, шт., вес)
+        </div>
+        <table style="margin-top:4px;">
+          <thead>
+            <tr>
+              <th style="width:36px;">БН</th>
+              <th>Источник (L-1 #ID или текст)</th>
+              <th style="width:52px;">Шт.</th>
+              <th style="width:62px;">Вес w</th>
+              <th style="width:52px;">ΔV</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono"><b>Б1</b></td>
+              <td><input type="text" id="edSrc1" placeholder="символ или #ID/текст" /></td>
+              <td><input type="number" id="edCnt1" min="1" max="64" step="1" value="1" oninput="recalcDrive()" /></td>
+              <td><input type="number" id="edWgt1" min="0.05" max="10" step="0.05" value="1.05" oninput="recalcDrive()" /></td>
+              <td class="mono" id="edDrv1">1.05</td>
+            </tr>
+            <tr id="edRowB2">
+              <td class="mono"><b>Б2</b></td>
+              <td><input type="text" id="edSrc2" placeholder="символ или #ID/текст" /></td>
+              <td><input type="number" id="edCnt2" min="1" max="64" step="1" value="1" oninput="recalcDrive()" /></td>
+              <td><input type="number" id="edWgt2" min="0.05" max="10" step="0.05" value="1.05" oninput="recalcDrive()" /></td>
+              <td class="mono" id="edDrv2">1.05</td>
+            </tr>
+            <tr>
+              <td class="mono"><b>Б3</b></td>
+              <td><input type="text" id="edSrc3" placeholder="символ или #ID/текст" /></td>
+              <td><input type="number" id="edCnt3" min="1" max="64" step="1" value="1" oninput="recalcDrive()" /></td>
+              <td><input type="number" id="edWgt3" min="0.05" max="10" step="0.05" value="1.05" oninput="recalcDrive()" /></td>
+              <td class="mono" id="edDrv3">1.05</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="param-grid" style="margin-top:8px; grid-template-columns: 1fr 120px;">
+          <label for="edVth">Порог срабатывания Г (V_th):</label>
+          <input type="number" id="edVth" min="0.2" max="20" step="0.05" value="2.00" oninput="recalcDrive()" />
+
+          <label for="edWin">Индив. окно W (мс, пусто=ур.):</label>
+          <input type="number" id="edWin" min="24" max="2000000" step="12" placeholder="по уровню" />
+
+          <label for="edRecs">Счётчик узнаваний:</label>
+          <input type="number" id="edRecs" min="0" step="1" value="1" />
+
+          <label>Суммарный вклад ΣΔV:</label>
+          <div class="mono" id="edSumDrive" style="text-align:right; font-weight:700;">3.15 &ge; 2.00</div>
+        </div>
+
+        <label class="chk-row">
+          <input type="checkbox" id="edConsolidated" checked />
+          Модуль активен и консолидирован в памяти
+        </label>
+
+        <div class="btn-row" style="margin-top:6px;">
+          <button class="primary" id="btnSaveFim" onclick="saveCurrentFim()">Сохранить изменения ФИМ</button>
+          <button class="good" onclick="createNewFim()">Создать новый ФИМ</button>
+          <button class="danger" id="btnDelFim" onclick="disableCurrentFim()">Отключить</button>
+        </div>
+        <div id="fimEditStatus" class="status-msg"></div>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="win-head">
+        <span class="win-title">Причинная иерархия выбранного ФИМа (вниз до L0 и вверх)</span>
+      </div>
+      <div class="win-body">
+        <div class="muted" id="edStageMeta">Выберите ФИМ для анализа обучения и синаптической цепи</div>
+        <div id="parentsBlock" style="margin-top:6px;"></div>
+        <div id="treeBlock" style="margin-top:8px; max-height:360px; overflow-y:auto;"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
-let activeLevel = 3;
-let currentData = null;
 let currentSim = null;
+let currentTraceFilterLvl = 0;
+let selectedSpikeKey = null;
 let playheadMs = 0;
-let simPlaying = false;
-let simRafId = null;
-let lastFrameTs = null;
-let traceLevelFilter = 0; // 0 = все уровни
-let selectedTarget = null; // {level, fim_id}
-let graphHitBoxes = []; // кликабельные узлы графа
+let isPlaying = false;
+let playTimer = null;
+let currentMemLevel = 3;
+let netConfig = null;
+let editorMode = 'edit'; // 'edit' | 'create'
+let currentEditedFim = { level: 3, fim_id: null };
 
 function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function fmtNum(n) {
-  return Number(n || 0).toLocaleString('ru-RU');
+function showMsg(elId, msg, isErr=false) {
+  const el = document.getElementById(elId);
+  el.textContent = msg;
+  el.className = 'status-msg show ' + (isErr ? 'err' : 'ok');
+  setTimeout(() => { el.className = 'status-msg'; }, 4500);
 }
 
-function setupHiDpiCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  const w = Math.max(300, Math.round(rect.width));
-  const h = Math.max(180, Math.round(rect.height));
-  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+// --- Init Level Selectors ---
+(function initControls() {
+  const edLvl = document.getElementById('edLevel');
+  for (let l = 1; l <= 9; l++) {
+    const opt = document.createElement('option');
+    opt.value = l;
+    opt.textContent = 'L' + l;
+    if (l === 3) opt.selected = true;
+    edLvl.appendChild(opt);
   }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return {ctx, W: w, H: h};
+  const tabs = document.getElementById('levelTabs');
+  for (let l = 1; l <= 9; l++) {
+    const b = document.createElement('button');
+    b.className = 'tab-btn' + (l === 3 ? ' active' : '');
+    b.textContent = 'L' + l;
+    b.onclick = () => inspectLevel(l);
+    tabs.appendChild(b);
+  }
+  const flt = document.getElementById('traceLevelFilters');
+  const allBtn = document.createElement('button');
+  allBtn.className = 'tab-btn active';
+  allBtn.textContent = 'Все';
+  allBtn.onclick = () => setTraceFilter(0, allBtn);
+  flt.appendChild(allBtn);
+  for (let l = 1; l <= 9; l++) {
+    const b = document.createElement('button');
+    b.className = 'tab-btn';
+    b.textContent = 'L' + l;
+    b.onclick = () => setTraceFilter(l, b);
+    flt.appendChild(b);
+  }
+})();
+
+function setTraceFilter(lvl, btn) {
+  currentTraceFilterLvl = lvl;
+  document.querySelectorAll('#traceLevelFilters button').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderTraceTable();
 }
 
-function setExample(txt) {
-  document.getElementById('inputText').value = txt;
+function setExample(text) {
+  document.getElementById('inputText').value = text;
   sendText(false);
 }
 
-function renderSummary(summary) {
-  let totCons = 0, totRec = 0;
-  const grid = document.getElementById('summaryGrid');
-  grid.innerHTML = '';
-  for (let lvl = 1; lvl <= 9; lvl++) {
-    const s = summary[lvl];
-    totCons += s.consolidated_fims;
-    totRec += s.total_recognitions;
-    const div = document.createElement('div');
-    div.className = 'lvl-card' + (activeLevel === lvl ? ' active' : '');
-    div.onclick = () => inspectLevel(lvl);
-    div.innerHTML = `<div class="lvl-head"><span>Ур.${lvl}</span><span>${s.window_ms}мс</span></div>
-      <div>ФИМ: <b>${fmtNum(s.consolidated_fims)}</b> / 1M</div>
-      <div class="muted">Узн: ${fmtNum(s.total_recognitions)}</div>`;
-    grid.appendChild(div);
+// --- Network & Level Configuration ---
+async function loadConfig() {
+  const res = await fetch('/api/config');
+  const cfg = await res.json();
+  applyConfigToUI(cfg);
+}
+
+function applyConfigToUI(cfg) {
+  if (!cfg) return;
+  netConfig = cfg;
+  document.getElementById('cfgDefCount').value = cfg.default_synapse_count;
+  document.getElementById('cfgDefWeight').value = cfg.default_synapse_weight;
+  document.getElementById('cfgDefVth').value = cfg.default_v_threshold;
+  document.getElementById('cfgTickMs').value = cfg.tick_ms;
+  document.getElementById('cfgInstinctMs').value = cfg.instinct_cycle_ms;
+  document.getElementById('cfgDtMs').value = cfg.dt_ms;
+  document.getElementById('cfgTau').value = cfg.tau_leak_factor;
+  document.getElementById('cfgL2Chars').value = cfg.level2_max_chars;
+  document.getElementById('cfgAssoc23').checked = !!cfg.allow_associative_2of3;
+
+  const l1 = cfg.levels && (cfg.levels['1'] || cfg.levels[1]);
+  if (l1) {
+    document.getElementById('cfgMinSyn').value = String(l1.min_synapses);
+    document.getElementById('cfgMaxSyn').value = String(l1.max_synapses);
   }
-  document.getElementById('hdrTotalCons').textContent = fmtNum(totCons);
-  document.getElementById('hdrTotalRec').textContent = fmtNum(totRec);
+  document.getElementById('statTickMs').textContent = cfg.tick_ms + ' мс';
+  document.getElementById('hdrTick').textContent = cfg.tick_ms;
+  document.getElementById('statInstinctMs').textContent = cfg.instinct_cycle_ms + ' мс';
+  document.getElementById('statVth').textContent = Number(cfg.default_v_threshold).toFixed(2);
+  renderLevelsConfigTable(cfg.levels);
 }
 
-async function loadSummary() {
-  const res = await fetch('/api/summary');
+function renderLevelsConfigTable(levelsObj) {
+  if (!levelsObj) return;
+  const tbody = document.getElementById('levelsConfigBody');
+  let html = '';
+  let totalFims = 0;
+  for (let l = 1; l <= 9; l++) {
+    const lv = levelsObj[String(l)] || levelsObj[l];
+    if (!lv) continue;
+    totalFims += lv.consolidated_fims;
+    html += `<tr class="clickable ${l === currentMemLevel ? 'selected-row' : ''}" onclick="if(event.target.tagName!=='INPUT') inspectLevel(${l})">
+      <td class="mono"><b>L${l}</b></td>
+      <td><input type="number" id="lvlWin_${l}" value="${lv.window_ms}" min="24" step="12" /></td>
+      <td><input type="number" id="lvlVth_${l}" value="${lv.v_threshold}" min="0.2" max="20" step="0.05" /></td>
+      <td class="mono">${lv.consolidated_fims.toLocaleString('ru-RU')}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+  document.getElementById('statTotalFims').textContent = totalFims.toLocaleString('ru-RU');
+}
+
+async function saveGlobalConfig() {
+  const payload = {
+    min_synapses: Number(document.getElementById('cfgMinSyn').value),
+    max_synapses: Number(document.getElementById('cfgMaxSyn').value),
+    default_synapse_count: Number(document.getElementById('cfgDefCount').value),
+    default_synapse_weight: Number(document.getElementById('cfgDefWeight').value),
+    default_v_threshold: Number(document.getElementById('cfgDefVth').value),
+    tick_ms: Number(document.getElementById('cfgTickMs').value),
+    instinct_cycle_ms: Number(document.getElementById('cfgInstinctMs').value),
+    dt_ms: Number(document.getElementById('cfgDtMs').value),
+    tau_leak_factor: Number(document.getElementById('cfgTau').value),
+    level2_max_chars: Number(document.getElementById('cfgL2Chars').value),
+    allow_associative_2of3: document.getElementById('cfgAssoc23').checked,
+    apply_to_existing: document.getElementById('cfgApplyExisting').checked,
+  };
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
   const data = await res.json();
-  renderSummary(data);
+  if (res.ok) {
+    applyConfigToUI(data.config);
+    showMsg('globalCfgStatus', 'Параметры сети применены и пересчитаны.');
+    await sendText(false);
+    await searchCurrentLevel();
+  } else {
+    showMsg('globalCfgStatus', data.error || 'Ошибка сохранения', true);
+  }
 }
 
+async function saveLevelConfigs() {
+  const levels = {};
+  for (let l = 1; l <= 9; l++) {
+    const wEl = document.getElementById('lvlWin_' + l);
+    const vEl = document.getElementById('lvlVth_' + l);
+    if (wEl && vEl) {
+      levels[l] = {
+        window_ms: Number(wEl.value),
+        v_threshold: Number(vEl.value),
+      };
+    }
+  }
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      levels,
+      apply_to_existing: document.getElementById('cfgApplyExisting').checked
+    })
+  });
+  const data = await res.json();
+  if (res.ok) {
+    applyConfigToUI(data.config);
+    showMsg('levelCfgStatus', 'Окна W_L и пороги уровней обновлены.');
+    await sendText(false);
+  } else {
+    showMsg('levelCfgStatus', data.error || 'Ошибка', true);
+  }
+}
+
+// --- Memory Browser ---
 async function inspectLevel(lvl) {
-  activeLevel = lvl;
-  loadSummary();
-  await searchActiveLevel();
+  currentMemLevel = lvl;
+  document.getElementById('memCurLvl').textContent = lvl;
+  document.querySelectorAll('#levelTabs button').forEach((b, i) => {
+    b.classList.toggle('active', i + 1 === lvl);
+  });
+  if (netConfig && netConfig.levels) renderLevelsConfigTable(netConfig.levels);
+  await searchCurrentLevel();
 }
 
-async function searchActiveLevel() {
-  const q = document.getElementById('levelSearchInput').value.trim();
-  const res = await fetch(`/api/level?lvl=${activeLevel}&limit=80&q=${encodeURIComponent(q)}`);
+async function searchCurrentLevel() {
+  const q = document.getElementById('memSearch').value || '';
+  const res = await fetch(`/api/level?lvl=${currentMemLevel}&limit=80&q=${encodeURIComponent(q)}`);
   const data = await res.json();
-  const box = document.getElementById('levelBrowser');
-  if (!data.fims.length) {
-    box.innerHTML = `<div class="muted" style="padding:10px;">На уровне ${activeLevel} по запросу «${esc(q)}» совпадений не найдено (всего на уровне: ${fmtNum(data.total_consolidated)}).</div>`;
+  document.getElementById('memCountInfo').textContent = `${data.matched_count} / ${data.total_consolidated.toLocaleString('ru-RU')}`;
+  const tbody = document.getElementById('memListBody');
+  if (!data.fims || !data.fims.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">Ничего не найдено</td></tr>';
     return;
   }
-  let html = `<div class="mono muted" style="font-size:11px;padding:2px 4px;">Уровень ${activeLevel}: показано ${data.fims.length} из ${fmtNum(data.matched_count)} (всего в пуле ${fmtNum(data.total_consolidated)} / ${fmtNum(data.max_fims)})</div>`;
-  for (const f of data.fims) {
-    const preview = f.text.length > 160 ? f.text.slice(0, 160) + '…' : f.text;
-    const stageBadge = f.training_stage ? ` · ${esc(f.training_stage)}` : '';
-    html += `<div class="fim-item" onclick="inspectFim(${activeLevel}, ${f.fim_id})">
-      <div class="mono" style="font-size:11px;color:#7dd3fc;">
-        <b>#${f.fim_id}</b> · узнан ${fmtNum(f.recognitions)}x · слоты ${JSON.stringify(f.synapse_slots)} · t=${f.created_at_ms}мс${stageBadge}
-      </div>
-      <div style="color:#f8fafc;margin-top:2px;">«${esc(preview)}»</div>
-    </div>`;
-  }
-  box.innerHTML = html;
+  tbody.innerHTML = data.fims.map(f => {
+    const isSel = currentEditedFim.level === currentMemLevel && currentEditedFim.fim_id === f.fim_id;
+    const cntStr = (f.synapse_counts || []).join('/');
+    return `<tr class="clickable ${isSel ? 'selected-row' : ''}" onclick="inspectFim(${currentMemLevel}, ${f.fim_id})">
+      <td class="mono">#${f.fim_id}</td>
+      <td class="mono"><b>${esc(f.text)}</b></td>
+      <td class="mono">${f.synapse_slots.length} (${cntStr})</td>
+      <td class="mono">${Number(f.v_threshold).toFixed(2)}</td>
+      <td class="mono">${f.recognitions}</td>
+    </tr>`;
+  }).join('');
 }
 
-function renderTree(node) {
-  const slotPrefix = node.slot ? `<b style="color:#38bdf8;">${esc(node.slot)}</b> ← ` : '';
-  const slotsStr = node.synapse_slots && node.synapse_slots.length ? ` · слоты ${JSON.stringify(node.synapse_slots)}` : '';
-  const clickAttr = node.level > 0 ? `onclick="event.stopPropagation(); inspectFim(${node.level}, ${node.fim_id})"` : '';
-  let html = `<div class="tree-node">
-    <div class="tree-head" ${clickAttr}>
-      ${slotPrefix}<b>L${node.level} #${node.fim_id}</b> «${esc(node.text)}»
-      <span class="muted mono" style="font-size:11px;">(${fmtNum(node.recognitions)}x${slotsStr})</span>
-    </div>`;
-  if (node.children && node.children.length) {
-    for (const ch of node.children) html += renderTree(ch);
+// --- Per-FIM Editor ---
+function toggleB2Slot() {
+  const mode = Number(document.getElementById('edSynMode').value);
+  document.getElementById('edRowB2').style.display = (mode === 3) ? '' : 'none';
+  recalcDrive();
+}
+
+function slotDrive(cnt, wgt) {
+  return Number(wgt) * (1.0 + 0.15 * Math.max(0, Number(cnt) - 1));
+}
+
+function recalcDrive() {
+  const mode = Number(document.getElementById('edSynMode').value);
+  const d1 = slotDrive(document.getElementById('edCnt1').value, document.getElementById('edWgt1').value);
+  const d2 = mode === 3 ? slotDrive(document.getElementById('edCnt2').value, document.getElementById('edWgt2').value) : 0;
+  const d3 = slotDrive(document.getElementById('edCnt3').value, document.getElementById('edWgt3').value);
+  document.getElementById('edDrv1').textContent = d1.toFixed(2);
+  document.getElementById('edDrv2').textContent = d2.toFixed(2);
+  document.getElementById('edDrv3').textContent = d3.toFixed(2);
+  const sum = d1 + d2 + d3;
+  const vth = Number(document.getElementById('edVth').value || 2.0);
+  const el = document.getElementById('edSumDrive');
+  el.textContent = `${sum.toFixed(2)} ${sum + 1e-9 >= vth ? '≥' : '<'} ${vth.toFixed(2)}`;
+  el.style.color = sum + 1e-9 >= vth ? '#157347' : '#b91c1c';
+}
+
+function openNewFimMode() {
+  editorMode = 'create';
+  document.getElementById('editorTitle').textContent = 'Создание нового ФИМа';
+  document.getElementById('edLevel').disabled = false;
+  document.getElementById('edLevel').value = String(currentMemLevel);
+  document.getElementById('edFimId').value = 'Новый';
+  document.getElementById('edDecodedText').textContent = '(по источникам)';
+  document.getElementById('edSynMode').value = '3';
+  document.getElementById('edSrc1').value = '';
+  document.getElementById('edSrc2').value = '';
+  document.getElementById('edSrc3').value = '';
+  document.getElementById('edCnt1').value = 1;
+  document.getElementById('edCnt2').value = 1;
+  document.getElementById('edCnt3').value = 1;
+  document.getElementById('edWgt1').value = 1.05;
+  document.getElementById('edWgt2').value = 1.05;
+  document.getElementById('edWgt3').value = 1.05;
+  document.getElementById('edVth').value = netConfig ? netConfig.default_v_threshold : 2.0;
+  document.getElementById('edWin').value = '';
+  document.getElementById('edRecs').value = 1;
+  document.getElementById('edConsolidated').checked = true;
+  document.getElementById('btnSaveFim').disabled = true;
+  document.getElementById('btnDelFim').disabled = true;
+  toggleB2Slot();
+}
+
+function loadFimIntoEditor(exp) {
+  if (!exp || exp.level < 1) return;
+  editorMode = 'edit';
+  currentEditedFim = { level: exp.level, fim_id: exp.fim_id };
+  document.getElementById('editorTitle').textContent = `Редактор ФИМ L${exp.level} #${exp.fim_id}`;
+  document.getElementById('edLevel').value = String(exp.level);
+  document.getElementById('edLevel').disabled = true;
+  document.getElementById('edFimId').value = '#' + exp.fim_id;
+  document.getElementById('edDecodedText').textContent = '«' + exp.text + '»';
+
+  const ch = exp.children || [];
+  const isTwo = ch.length === 2;
+  document.getElementById('edSynMode').value = isTwo ? '2' : '3';
+
+  const fillSlot = (idx, sIn, cIn, wIn) => {
+    const item = ch[idx];
+    if (!item) {
+      document.getElementById(sIn).value = '';
+      document.getElementById(cIn).value = 1;
+      document.getElementById(wIn).value = 1.05;
+      return;
+    }
+    const label = item.level === 0 ? item.text : ('#' + item.fim_id + ' (' + item.text + ')');
+    document.getElementById(sIn).value = item.level === 0 ? item.text : ('#' + item.fim_id);
+    document.getElementById(cIn).value = item.synapse_count || 1;
+    document.getElementById(wIn).value = item.weight || 1.05;
+  };
+
+  if (isTwo) {
+    fillSlot(0, 'edSrc1', 'edCnt1', 'edWgt1');
+    document.getElementById('edSrc2').value = '';
+    fillSlot(1, 'edSrc3', 'edCnt3', 'edWgt3');
+  } else {
+    fillSlot(0, 'edSrc1', 'edCnt1', 'edWgt1');
+    fillSlot(1, 'edSrc2', 'edCnt2', 'edWgt2');
+    fillSlot(2, 'edSrc3', 'edCnt3', 'edWgt3');
   }
-  html += `</div>`;
-  return html;
+
+  document.getElementById('edVth').value = exp.v_threshold ?? 2.0;
+  document.getElementById('edWin').value = exp.custom_window_ms || '';
+  document.getElementById('edRecs').value = exp.recognitions ?? 0;
+  document.getElementById('edConsolidated').checked = exp.consolidated !== false;
+  document.getElementById('btnSaveFim').disabled = false;
+  document.getElementById('btnDelFim').disabled = false;
+  toggleB2Slot();
+  renderExplanation(exp);
+}
+
+function collectEditorPayload() {
+  const lvl = Number(document.getElementById('edLevel').value);
+  const mode = Number(document.getElementById('edSynMode').value);
+  const s1 = document.getElementById('edSrc1').value;
+  const s2 = document.getElementById('edSrc2').value;
+  const s3 = document.getElementById('edSrc3').value;
+  const c1 = Number(document.getElementById('edCnt1').value);
+  const c2 = Number(document.getElementById('edCnt2').value);
+  const c3 = Number(document.getElementById('edCnt3').value);
+  const w1 = Number(document.getElementById('edWgt1').value);
+  const w2 = Number(document.getElementById('edWgt2').value);
+  const w3 = Number(document.getElementById('edWgt3').value);
+  const winRaw = document.getElementById('edWin').value.trim();
+
+  const sources = mode === 2 ? [s1, s3] : [s1, s2, s3];
+  const synapse_slots = mode === 2 ? [0, 2] : [0, 1, 2];
+  const synapse_counts = mode === 2 ? [c1, c3] : [c1, c2, c3];
+  const synapse_weights = mode === 2 ? [w1, w3] : [w1, w2, w3];
+
+  return {
+    level: lvl,
+    fim_id: currentEditedFim.fim_id,
+    sources,
+    synapse_slots,
+    synapse_counts,
+    synapse_weights,
+    v_threshold: Number(document.getElementById('edVth').value),
+    custom_window_ms: winRaw ? Number(winRaw) : null,
+    recognitions: Number(document.getElementById('edRecs').value),
+    consolidated: document.getElementById('edConsolidated').checked,
+    probe_text: document.getElementById('inputText').value,
+  };
+}
+
+async function saveCurrentFim() {
+  if (currentEditedFim.fim_id === null) return;
+  const payload = collectEditorPayload();
+  const res = await fetch('/api/fim/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showMsg('fimEditStatus', data.error || 'Ошибка обновления ФИМ', true);
+    return;
+  }
+  loadFimIntoEditor(data.fim);
+  showMsg('fimEditStatus', `ФИМ L${data.fim.level}#${data.fim.fim_id} сохранён. Осциллограф пересчитан.`);
+  await sendText(false, data.fim.level, data.fim.fim_id);
+  await searchCurrentLevel();
+}
+
+async function createNewFim() {
+  const payload = collectEditorPayload();
+  const res = await fetch('/api/fim/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showMsg('fimEditStatus', data.error || 'Ошибка создания ФИМ', true);
+    return;
+  }
+  loadFimIntoEditor(data.fim);
+  if (data.config) applyConfigToUI(data.config);
+  showMsg('fimEditStatus', `Создан ФИМ L${data.fim.level}#${data.fim.fim_id} «${data.fim.text}»`);
+  await inspectLevel(data.fim.level);
+  await sendText(false, data.fim.level, data.fim.fim_id);
+}
+
+async function disableCurrentFim() {
+  if (currentEditedFim.fim_id === null) return;
+  const res = await fetch('/api/fim/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(currentEditedFim)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showMsg('fimEditStatus', data.error || 'Ошибка отключения', true);
+    return;
+  }
+  showMsg('fimEditStatus', `ФИМ L${currentEditedFim.level}#${currentEditedFim.fim_id} отключён.`);
+  await loadConfig();
+  await searchCurrentLevel();
+  await sendText(false);
+}
+
+async function inspectFim(lvl, fid) {
+  if (lvl < 1) return;
+  const probe = document.getElementById('inputText').value || '';
+  const res = await fetch(`/api/fim?lvl=${lvl}&id=${fid}&probe=${encodeURIComponent(probe)}`);
+  const exp = await res.json();
+  loadFimIntoEditor(exp);
+  if (exp.simulation) {
+    loadSimulation(exp.simulation, false);
+  }
+  if (lvl !== currentMemLevel) {
+    inspectLevel(lvl);
+  } else {
+    searchCurrentLevel();
+  }
 }
 
 function renderExplanation(exp) {
   if (!exp) return;
-  const box = document.getElementById('analyticsBox');
-  let parentsHtml = '<span class="muted">Нет исходящих синапсов выше (верхний узел).</span>';
-  if (exp.parents && exp.parents.length) {
-    parentsHtml = exp.parents.map(p =>
-      `<span class="slot-chip hit" onclick="inspectFim(${p.level}, ${p.fim_id})">L${p.level} #${p.fim_id} «${esc(p.text.slice(0, 48))}» (${fmtNum(p.recognitions)}x)</span>`
-    ).join('');
-  }
-  box.innerHTML = `
-    <div style="font-size:14px;font-weight:700;color:#7dd3fc;margin-bottom:6px;">
-      Уровень ${exp.level}, ФИМ #${exp.fim_id} — «${esc(exp.text)}»
-    </div>
-    <div class="mono" style="background:#0b1220;border:1px solid #1e293b;border-radius:5px;padding:7px 9px;font-size:11.5px;margin-bottom:8px;">
-      <div><b>Этап обучения:</b> ${esc(exp.training_stage || '—')} | <b>Консолидация:</b> ${exp.created_at_ms} мс | <b>Слоты:</b> ${JSON.stringify(exp.synapse_slots)} | <b>Узнаваний:</b> ${fmtNum(exp.recognitions)}</div>
-      <div style="margin-top:3px;color:#94a3b8;"><b>Контекст при записи:</b> «${esc(exp.training_context || '—')}»</div>
-    </div>
-    <div style="margin-bottom:8px;"><b style="font-size:11.5px;color:#cbd5e1;">Куда идёт спайк дальше (Уровень ${exp.level + 1}):</b><div style="margin-top:4px;">${parentsHtml}</div></div>
-    <div><b style="font-size:11.5px;color:#cbd5e1;">Иерархия сборки от Б1, Б2, Б3 вниз до Уровня 0:</b>${renderTree(exp)}</div>
-  `;
-}
+  document.getElementById('edStageMeta').innerHTML =
+    `Этап: <b>${esc(exp.training_stage || '—')}</b> · Окно: <b>${exp.window_ms} мс</b> · t_созд: <b>${exp.created_at_ms} мс</b>` +
+    (exp.training_context ? `<br>Контекст: <span class="mono">«${esc(exp.training_context)}»</span>` : '');
 
-async function inspectFim(lvl, fid) {
-  if (lvl <= 0) return;
-  selectedTarget = {level: lvl, fim_id: fid};
-  const currentText = document.getElementById('inputText').value.trim();
-  const res = await fetch(`/api/fim?lvl=${lvl}&id=${fid}`);
-  const exp = await res.json();
-  renderExplanation(exp);
-  if (exp.simulation) {
-    // Если сейчас нет активного текста или пользователь кликнул внешний ФИМ из базы, показываем его симуляцию
-    if (!currentSim || currentText !== (currentSim.clean_text || '')) {
-      loadSimulation(exp.simulation, false);
-    } else {
-      // Иначе фокусируемся на этом ФИМе, если он участвовал, или показываем его собственную симуляцию
-      const matched = currentSim.fim_spikes.some(s => s.level === lvl && s.fim_id === fid);
-      if (matched) {
-        renderTraceTable();
-        drawNengoAll();
-      } else {
-        loadSimulation(exp.simulation, false);
-      }
+  const parentsHtml = (exp.parents && exp.parents.length)
+    ? '<div style="font-weight:700; font-size:11px; margin-bottom:3px;">Исходящие синапсы вверх (L' + (exp.level + 1) + '):</div>' +
+      exp.parents.map(p =>
+        `<span class="tag hit" style="cursor:pointer;" onclick="inspectFim(${p.level}, ${p.fim_id})">L${p.level}#${p.fim_id} «${esc(p.text)}» (${p.recognitions})</span>`
+      ).join('')
+    : '<span class="muted">Нет исходящих синапсов на уровень выше</span>';
+  document.getElementById('parentsBlock').innerHTML = parentsHtml;
+
+  function buildTree(node, isRoot) {
+    const slotTag = node.slot ? `<span class="tag">${esc(node.slot)}</span>` : '';
+    const synMeta = node.synapse_count ? `<span class="muted mono">[${node.synapse_count}шт, w=${node.weight}]</span>` : '';
+    const clickAttr = node.level > 0 ? `onclick="inspectFim(${node.level}, ${node.fim_id})"` : '';
+    let inner = `<div class="${isRoot ? 'tree-root' : 'tree-node'}">
+      <div class="tree-card" ${clickAttr}>
+        ${slotTag}<b class="mono">L${node.level}#${node.fim_id}</b> <span class="mono">«${esc(node.text)}»</span> ${synMeta}
+      </div>`;
+    if (node.children && node.children.length) {
+      inner += node.children.map(ch => buildTree(ch, false)).join('');
     }
+    inner += '</div>';
+    return inner;
+  }
+  document.getElementById('treeBlock').innerHTML =
+    '<div style="font-weight:700; font-size:11px; margin-bottom:3px;">Дерево входов вниз до L0:</div>' + buildTree(exp, true);
+}
+
+// --- Simulation & Trace Table ---
+async function sendText(learn, focusLvl=null, focusFid=null) {
+  const t0 = performance.now();
+  const text = document.getElementById('inputText').value;
+  const res = await fetch('/api/check', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, learn, focus_level: focusLvl, focus_fim_id: focusFid})
+  });
+  const data = await res.json();
+  const dt = (performance.now() - t0).toFixed(1);
+  document.getElementById('latencyBadge').textContent = `${dt} мс · Вход: «${data.clean_text || '—'}»`;
+
+  const ansMain = document.getElementById('topAnswerMain');
+  const ansMeta = document.getElementById('topAnswerMeta');
+  if (!data.top_level) {
+    ansMain.textContent = 'Нет сработавших ФИМ (можно обучить)';
+    ansMeta.innerHTML = '';
+  } else {
+    ansMain.textContent = `«${data.top_response_text}»`;
+    ansMeta.innerHTML = `Ур. ${data.top_level}: ` + data.top_fims.map(f => {
+      const conf = (f.confidence && f.confidence < 0.99) ? ` [2/3: ${f.confidence}]` : '';
+      return `<span class="tag hit" style="cursor:pointer;" onclick="inspectFim(${data.top_level}, ${f.fim_id})">L${data.top_level}#${f.fim_id} «${esc(f.text)}»${conf}</span>`;
+    }).join('');
+  }
+
+  const recMain = document.getElementById('recallMain');
+  const recMeta = document.getElementById('recallMeta');
+  if (data.recalled_level > data.top_level && data.recalled_text) {
+    recMain.style.color = '#157347';
+    recMain.textContent = `«${data.recalled_text}»`;
+    recMeta.innerHTML = `<span class="tag hit" style="cursor:pointer;" onclick="inspectFim(${data.recalled_level}, ${data.recalled_fim_id})">L${data.recalled_level}#${data.recalled_fim_id}</span>`;
+  } else {
+    recMain.style.color = '#556070';
+    recMain.textContent = 'Совпадает с верхним узнанным уровнем';
+    recMeta.innerHTML = '';
+  }
+
+  if (data.config) applyConfigToUI(data.config);
+  const expToLoad = data.recalled_explanation || data.top_explanation;
+  if (expToLoad && focusLvl === null) {
+    loadFimIntoEditor(expToLoad);
+  }
+  if (data.simulation) {
+    loadSimulation(data.simulation, true);
   }
 }
 
-function renderTraceFilters() {
-  const bar = document.getElementById('traceFilterBar');
-  if (!currentSim) { bar.innerHTML = ''; return; }
-  const lvls = Array.from(new Set(currentSim.fim_spikes.map(s => s.level))).sort((a,b) => a - b);
-  let html = `<button class="sec ${traceLevelFilter === 0 ? 'active' : ''}" style="padding:3px 8px;font-size:11px;" onclick="setTraceFilter(0)">Все (${currentSim.fim_spikes.length})</button>`;
-  for (const l of lvls) {
-    const cnt = currentSim.fim_spikes.filter(s => s.level === l).length;
-    html += `<button class="sec ${traceLevelFilter === l ? 'active' : ''}" style="padding:3px 8px;font-size:11px;" onclick="setTraceFilter(${l})">L${l} (${cnt})</button>`;
+function loadSimulation(sim, resetTime=true) {
+  currentSim = sim;
+  const slider = document.getElementById('timeSlider');
+  slider.max = sim.duration_ms;
+  slider.step = sim.dt_ms;
+  if (resetTime) {
+    stopPlay();
+    playheadMs = sim.duration_ms;
+  } else {
+    playheadMs = Math.min(playheadMs, sim.duration_ms);
   }
-  bar.innerHTML = html;
-}
+  slider.value = playheadMs;
+  document.getElementById('clockLabel').textContent = `t = ${playheadMs} мс`;
 
-function setTraceFilter(lvl) {
-  traceLevelFilter = lvl;
-  renderTraceFilters();
+  if (sim.target_fim) {
+    selectedSpikeKey = `${sim.target_fim.level}:${sim.target_fim.fim_id}`;
+    document.getElementById('dagFocusLabel').textContent =
+      `Фокус: L${sim.target_fim.level}#${sim.target_fim.fim_id} «${sim.target_fim.text}» | V_th=${Number(sim.target_fim.v_threshold).toFixed(2)} | W=${sim.target_fim.window_ms} мс`;
+  } else {
+    selectedSpikeKey = null;
+    document.getElementById('dagFocusLabel').textContent = 'Нет активного модуля';
+  }
+  document.getElementById('traceCount').textContent = (sim.fim_spikes || []).length;
   renderTraceTable();
+  drawNengoAll();
 }
 
 function renderTraceTable() {
   const tbody = document.getElementById('traceBody');
-  if (!currentSim || !currentSim.fim_spikes.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:14px;">Последовательных срабатываний ФИМ на этом входе не обнаружено.</td></tr>`;
+  if (!currentSim || !currentSim.fim_spikes || !currentSim.fim_spikes.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">Нет сработавших последовательностей.</td></tr>';
     return;
   }
-  const showAll = document.getElementById('chkShowAllTimes').checked;
+  const q = (document.getElementById('traceFilterInput').value || '').trim().toLowerCase();
   const rows = currentSim.fim_spikes.filter(sp => {
-    if (traceLevelFilter > 0 && sp.level !== traceLevelFilter) return false;
-    if (!showAll && sp.time_ms > playheadMs) return false;
+    if (currentTraceFilterLvl > 0 && sp.level !== currentTraceFilterLvl) return false;
+    if (q && !sp.text.toLowerCase().includes(q) && !('#' + sp.fim_id).includes(q)) return false;
     return true;
   });
-
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:14px;">Нет событий для выбранного фильтра / момента времени t=${Math.round(playheadMs)} мс.</td></tr>`;
-    return;
-  }
-
-  let html = '';
-  for (const sp of rows) {
-    const isFuture = sp.time_ms > playheadMs;
-    const isSelected = selectedTarget && selectedTarget.level === sp.level && selectedTarget.fim_id === sp.fim_id;
-    const isPartial = sp.confidence < 0.99;
-    const badgeCls = sp.event_type === 'consolidation' ? 'cons' : (isPartial ? 'p23' : 'rec');
-    const badgeText = sp.event_type === 'consolidation'
-      ? 'ЗАПИСЬ 1.0'
-      : (isPartial ? `2-ИЗ-3 (${sp.confidence})` : 'УЗНАН 1.0');
-    const tickNum = Math.round(sp.time_ms / currentSim.tick_ms);
-    const instBadge = (sp.time_ms % currentSim.instinct_cycle_ms === 0)
-      ? ` <span class="badge inst" title="Импульс осциллятора инстинкта 252 мс">252мс</span>` : '';
-
-    const formulaHtml = (sp.sources_detail || []).map(sd => {
+  tbody.innerHTML = rows.map(sp => {
+    const key = `${sp.level}:${sp.fim_id}`;
+    const isSel = key === selectedSpikeKey;
+    const isAssoc = sp.confidence < 0.99;
+    const synHtml = (sp.sources_detail || []).map(sd => {
       const cls = sd.fired ? 'hit' : 'miss';
-      const mark = sd.fired ? '✓' : '✗';
-      const click = sd.child_level > 0 ? `event.stopPropagation(); inspectFim(${sd.child_level}, ${sd.child_id})` : 'event.stopPropagation()';
-      return `<span class="slot-chip ${cls}" onclick="${click}" title="Синапс ${sd.neuron} от L${sd.child_level}#${sd.child_id}"><b>${sd.neuron}</b>: L${sd.child_level}#${sd.child_id} «${esc(sd.child_text)}» ${mark}</span>`;
+      const prefix = sd.child_level === 0 ? 'L0' : `L${sd.child_level}#${sd.child_id}`;
+      return `<span class="tag ${cls}">${sd.neuron}:${prefix} «${esc(sd.child_text)}» (${sd.synapse_count}шт·w=${sd.weight})</span>`;
     }).join(' ');
-
-    html += `<tr class="${isSelected ? 'selected' : ''} ${isFuture ? 'future' : ''}" onclick="selectSpikeRow(${sp.level}, ${sp.fim_id}, ${sp.time_ms})">
-      <td class="mono"><b>${sp.time_ms} мс</b><div class="muted" style="font-size:10.5px;">такт #${tickNum}${instBadge}</div></td>
-      <td class="mono"><b>L${sp.level}</b><div class="muted" style="font-size:10.5px;">W=${sp.window_ms} мс</div></td>
-      <td><span class="badge ${badgeCls}">${badgeText}</span></td>
-      <td><div class="mono" style="color:#7dd3fc;font-size:11px;">#${sp.fim_id} (${fmtNum(sp.recognitions)}x)</div><div><b>«${esc(sp.text)}»</b></div></td>
-      <td>${formulaHtml}</td>
-      <td class="muted" style="font-size:11px;">${esc(sp.training_stage || '—')}</td>
+    const modeTag = isAssoc
+      ? `<span class="tag assoc">2-из-3 (${sp.confidence})</span>`
+      : `<span class="tag hit">${sp.synapse_slots.length}-из-${sp.synapse_slots.length} (1.0)</span>`;
+    return `<tr class="clickable ${isSel ? 'selected-row' : ''}" onclick="inspectFim(${sp.level}, ${sp.fim_id})">
+      <td class="mono">${sp.time_ms}</td>
+      <td class="mono"><b>L${sp.level}#${sp.fim_id}</b></td>
+      <td class="mono"><b>«${esc(sp.text)}»</b></td>
+      <td>${synHtml}</td>
+      <td class="mono">${sp.window_ms}мс / ${Number(sp.v_threshold).toFixed(2)}</td>
+      <td>${modeTag}</td>
+      <td><button onclick="event.stopPropagation(); inspectFim(${sp.level}, ${sp.fim_id})">Настроить</button></td>
     </tr>`;
-  }
-  tbody.innerHTML = html;
+  }).join('');
 }
 
-async function selectSpikeRow(lvl, fid, tMs) {
-  simPause();
-  playheadMs = Math.max(playheadMs, tMs);
-  updateClockUi();
-  await inspectFim(lvl, fid);
-}
-
-function updateClockUi() {
-  if (!currentSim) return;
-  document.getElementById('simScrub').value = Math.round(playheadMs);
-  document.getElementById('simClock').textContent = `t = ${Math.round(playheadMs)} / ${currentSim.duration_ms} мс`;
-  const tickN = Math.floor(playheadMs / currentSim.tick_ms);
-  const instN = Math.floor(playheadMs / currentSim.instinct_cycle_ms);
-  document.getElementById('simTicks').textContent = `Такт L0: #${tickN} · Инстинкт: #${instN}`;
-}
-
-function loadSimulation(sim, autoPlay = true) {
-  currentSim = sim;
-  traceLevelFilter = 0;
-  if (!sim) {
-    playheadMs = 0;
-    document.getElementById('simClock').textContent = 't = 0 / 0 мс';
-    document.getElementById('simTargetBadge').textContent = 'Цель осциллографа: —';
-    renderTraceFilters();
-    renderTraceTable();
-    drawNengoAll();
-    return;
-  }
-  document.getElementById('simScrub').max = sim.duration_ms;
-  const tgt = sim.target_fim;
-  if (tgt) {
-    selectedTarget = {level: tgt.level, fim_id: tgt.fim_id};
-    document.getElementById('simTargetBadge').textContent = `Цель осциллографа: L${tgt.level} #${tgt.fim_id} «${tgt.text.slice(0, 34)}» (окно ${tgt.window_ms} мс)`;
-  } else {
-    document.getElementById('simTargetBadge').textContent = 'Цель осциллографа: —';
-  }
-  renderTraceFilters();
-
-  if (autoPlay) {
-    playheadMs = 0;
-    updateClockUi();
-    renderTraceTable();
-    simPlay();
-  } else {
-    simPause();
-    playheadMs = sim.duration_ms;
-    updateClockUi();
-    renderTraceTable();
-    drawNengoAll();
-  }
-}
-
-function simSeek(ms) {
-  if (!currentSim) return;
-  simPause();
-  playheadMs = Math.max(0, Math.min(currentSim.duration_ms, ms));
-  updateClockUi();
-  renderTraceTable();
+// --- Transport Playback ---
+function resetPlayhead() {
+  stopPlay();
+  playheadMs = 0;
+  document.getElementById('timeSlider').value = 0;
+  document.getElementById('clockLabel').textContent = 't = 0 мс';
   drawNengoAll();
 }
-
-function simStep(deltaMs) {
+function stepPlayhead(dir) {
   if (!currentSim) return;
-  simSeek(playheadMs + deltaMs);
+  stopPlay();
+  playheadMs = Math.max(0, Math.min(currentSim.duration_ms, playheadMs + dir * currentSim.tick_ms));
+  document.getElementById('timeSlider').value = playheadMs;
+  document.getElementById('clockLabel').textContent = `t = ${playheadMs} мс`;
+  drawNengoAll();
 }
-
-function simPlay() {
+function scrubTime(val) {
+  playheadMs = Number(val);
+  document.getElementById('clockLabel').textContent = `t = ${playheadMs} мс`;
+  drawNengoAll();
+}
+function togglePlay() {
   if (!currentSim) return;
+  if (isPlaying) { stopPlay(); return; }
   if (playheadMs >= currentSim.duration_ms) playheadMs = 0;
-  simPlaying = true;
-  lastFrameTs = null;
-  if (simRafId) cancelAnimationFrame(simRafId);
-  simRafId = requestAnimationFrame(stepPlayback);
+  isPlaying = true;
+  document.getElementById('playPauseBtn').textContent = '|| Пауза';
+  playTimer = setInterval(() => {
+    const spd = Number(document.getElementById('speedSelect').value || 0.5);
+    playheadMs = Math.min(currentSim.duration_ms, playheadMs + Math.round(currentSim.dt_ms * Math.max(1, spd * 2)));
+    document.getElementById('timeSlider').value = playheadMs;
+    document.getElementById('clockLabel').textContent = `t = ${playheadMs} мс`;
+    drawNengoAll();
+    if (playheadMs >= currentSim.duration_ms) stopPlay();
+  }, 55);
+}
+function stopPlay() {
+  isPlaying = false;
+  if (playTimer) clearInterval(playTimer);
+  playTimer = null;
+  document.getElementById('playPauseBtn').textContent = '▶ Пуск';
 }
 
-function simPause() {
-  simPlaying = false;
-  if (simRafId) cancelAnimationFrame(simRafId);
-  simRafId = null;
+// --- Classic Nengo GUI Canvas Renderers (White scientific surfaces) ---
+function setupCanvas(id) {
+  const c = document.getElementById(id);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth || 500;
+  const H = Number(c.getAttribute('height')) || 220;
+  c.width = Math.round(W * dpr);
+  c.height = Math.round(H * dpr);
+  const ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, W, H, c };
 }
 
-function simEnd() {
-  if (!currentSim) return;
-  simPause();
-  playheadMs = currentSim.duration_ms;
-  updateClockUi();
-  renderTraceTable();
-  drawNengoAll();
-}
-
-function onScrub(val) {
-  simSeek(Number(val));
-}
-
-function stepPlayback(ts) {
-  if (!simPlaying || !currentSim) return;
-  if (lastFrameTs === null) lastFrameTs = ts;
-  const elapsed = ts - lastFrameTs;
-  lastFrameTs = ts;
-  const mult = Number(document.getElementById('simSpeed').value || 1);
-  const speed = Math.max(0.55, currentSim.duration_ms / 1600) * mult;
-  playheadMs = Math.min(currentSim.duration_ms, playheadMs + elapsed * speed);
-  updateClockUi();
-  drawNengoAll();
-  if (playheadMs < currentSim.duration_ms) {
-    simRafId = requestAnimationFrame(stepPlayback);
-  } else {
-    simPlaying = false;
-    renderTraceTable();
-  }
-}
-
-function drawNengoAll() {
-  drawNetworkGraph();
-  drawRasterPlot();
-  drawOscilloscope();
-}
-
-function drawNetworkGraph() {
-  const canvas = document.getElementById('networkCanvas');
-  const {ctx, W, H} = setupHiDpiCanvas(canvas);
-  ctx.clearRect(0, 0, W, H);
-  graphHitBoxes = [];
-
-  if (!currentSim) {
-    ctx.fillStyle = '#64748b';
-    ctx.font = '13px system-ui';
-    ctx.fillText('Подайте фразу или выберите пример выше, чтобы увидеть причинный граф спайков и ансамбль Б1/Б2/Б3 → Г.', 20, H / 2);
-    return;
-  }
-
-  const ensembleW = 290;
-  const dagW = W - ensembleW - 22;
-
-  // Группируем узлы по уровням L0 .. maxLvl (реальные узлы каскада!)
-  const maxLvl = Math.max(1, ...currentSim.fim_spikes.map(s => s.level));
-  const rowCount = maxLvl + 1;
-  const rowGap = Math.min(54, (H - 34) / Math.max(2, rowCount));
-
-  // Индекс позиций узлов (key = `${lvl}:${id}:${t}`) и последняя позиция для каждого (lvl, id)
-  const nodePos = {};
-  const nodesToDraw = [];
-
-  // L0: входные символы
-  const elems = currentSim.element_spikes;
-  const maxElemSpan = Math.max(1, elems.length);
-  const xPadL = 62, xPadR = 24;
-  const availW = Math.max(120, dagW - xPadL - xPadR);
-  const yL0 = H - 28;
-
-  for (let i = 0; i < elems.length; i++) {
-    const es = elems[i];
-    const x = xPadL + ((i + 0.5) / maxElemSpan) * availW;
-    const pos = {x, y: yL0, lvl: 0, fim_id: es.node_id, time_ms: es.time_ms, text: es.char, confidence: 1.0};
-    nodePos[`0:${es.node_id}:${es.time_ms}`] = pos;
-    nodePos[`0:${es.node_id}:last`] = pos;
-    nodesToDraw.push(pos);
-  }
-
-  // L1..maxLvl: реальные спайки ФИМ по времени
-  const dur = Math.max(1, currentSim.duration_ms);
-  for (const sp of currentSim.fim_spikes) {
-    const y = yL0 - sp.level * rowGap;
-    const x = xPadL + Math.min(0.97, Math.max(0.04, sp.time_ms / dur)) * availW;
-    const pos = {
-      x, y, lvl: sp.level, fim_id: sp.fim_id, time_ms: sp.time_ms,
-      text: sp.text, confidence: sp.confidence, sources_detail: sp.sources_detail || [],
-      event_type: sp.event_type,
-    };
-    nodePos[`${sp.level}:${sp.fim_id}:${sp.time_ms}`] = pos;
-    nodePos[`${sp.level}:${sp.fim_id}:last`] = pos;
-    nodesToDraw.push(pos);
-  }
-
-  // Подписи уровней слева в DAG
-  ctx.font = 'bold 10.5px monospace';
-  for (let l = 0; l <= maxLvl; l++) {
-    const y = yL0 - l * rowGap;
-    ctx.strokeStyle = 'rgba(30,41,59,0.5)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(46, y);
-    ctx.lineTo(dagW - 8, y);
-    ctx.stroke();
-    ctx.fillStyle = l === 0 ? '#38bdf8' : '#94a3b8';
-    ctx.fillText(`L${l}`, 12, y + 4);
-  }
-
-  // Линии синаптической связи от дочерних узлов к родительским ФИМ
-  for (const node of nodesToDraw) {
-    if (node.lvl === 0) continue;
-    const activeNode = node.time_ms <= playheadMs;
-    const partial = node.confidence < 0.99;
-    for (const sd of node.sources_detail) {
-      // Ищем ближайший по времени <= node.time_ms дочерний узел
-      let childPos = null;
-      for (const cand of nodesToDraw) {
-        if (cand.lvl === sd.child_level && cand.fim_id === sd.child_id && cand.time_ms <= node.time_ms) {
-          if (!childPos || cand.time_ms > childPos.time_ms) childPos = cand;
-        }
-      }
-      if (!childPos) continue;
-      ctx.strokeStyle = activeNode
-        ? (sd.fired ? (partial ? 'rgba(251,191,36,0.75)' : 'rgba(74,222,128,0.7)') : 'rgba(248,113,113,0.35)')
-        : 'rgba(51,65,85,0.28)';
-      ctx.lineWidth = activeNode && sd.fired ? 1.7 : 1;
-      if (!sd.fired) ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(childPos.x, childPos.y - 9);
-      ctx.lineTo(node.x, node.y + 9);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-  }
-
-  // Рисуем узлы
-  for (const n of nodesToDraw) {
-    const fired = n.time_ms <= playheadMs;
-    const fresh = fired && (playheadMs - n.time_ms <= 96);
-    const isSel = selectedTarget && selectedTarget.level === n.lvl && selectedTarget.fim_id === n.fim_id;
-    if (n.lvl === 0) {
-      const r = fresh ? 10 : 8;
-      ctx.fillStyle = fired ? (fresh ? '#0284c7' : '#0c4a6e') : '#0f172a';
-      ctx.strokeStyle = fired ? '#38bdf8' : '#334155';
-      ctx.lineWidth = fresh ? 2 : 1;
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = fired ? '#f8fafc' : '#64748b';
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(n.text === ' ' ? '␠' : n.text, n.x, n.y + 3.5);
-      ctx.textAlign = 'left';
-    } else {
-      const label = n.text.length > 14 ? n.text.slice(0, 13) + '…' : n.text;
-      const bw = Math.max(54, Math.min(130, label.length * 6.8 + 18));
-      const bh = 21;
-      const partial = n.confidence < 0.99;
-      ctx.fillStyle = isSel ? '#0c2749' : (fresh ? (partial ? '#78350f' : '#064e3b') : '#0b1220');
-      ctx.strokeStyle = isSel ? '#38bdf8' : (fired ? (partial ? '#fbbf24' : '#4ade80') : '#334155');
-      ctx.lineWidth = isSel || fresh ? 2.2 : 1.1;
-      ctx.beginPath();
-      ctx.roundRect(n.x - bw / 2, n.y - bh / 2, bw, bh, 5);
-      ctx.fill(); ctx.stroke();
-
-      ctx.fillStyle = fired ? '#f8fafc' : '#64748b';
-      ctx.font = '10.5px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(label, n.x, n.y + 3.5);
-      ctx.textAlign = 'left';
-      graphHitBoxes.push({x1: n.x - bw/2, y1: n.y - bh/2, x2: n.x + bw/2, y2: n.y + bh/2, lvl: n.lvl, fim_id: n.fim_id, time_ms: n.time_ms});
-    }
-  }
-
-  // Правая панель: целевой LIF ансамбль ФИМ (Б1, Б2, Б3 -> Г) + Инстинкт 252 мс
-  const px = W - ensembleW - 6, py = 8, pw = ensembleW, ph = H - 16;
-  ctx.fillStyle = '#090f1d';
-  ctx.strokeStyle = '#1e293b';
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.roundRect(px, py, pw, ph, 8);
-  ctx.fill(); ctx.stroke();
-
-  let instinctPulse = false;
-  for (const tp of currentSim.instinct_pulses_ms) {
-    if (Math.abs(playheadMs - tp) <= 45 && playheadMs >= tp - 10) instinctPulse = true;
-  }
-
-  ctx.fillStyle = instinctPulse ? '#450a0a' : '#111827';
-  ctx.strokeStyle = instinctPulse ? '#f87171' : '#7f1d1d';
-  ctx.lineWidth = instinctPulse ? 2.2 : 1.1;
-  ctx.beginPath();
-  ctx.roundRect(px + 10, py + 10, pw - 20, 26, 5);
-  ctx.fill(); ctx.stroke();
-  ctx.fillStyle = instinctPulse ? '#fca5a5' : '#cbd5e1';
-  ctx.font = 'bold 11px monospace';
-  ctx.fillText(instinctPulse ? '⚡ ИНСТИНКТ 252 мс: ИМПУЛЬС' : 'Осциллятор инстинкта 252 мс', px + 18, py + 27);
-
-  const tgt = currentSim.target_fim;
-  if (tgt) {
-    ctx.fillStyle = '#7dd3fc';
-    ctx.font = 'bold 11.5px monospace';
-    ctx.fillText(`Ансамбль L${tgt.level}#${tgt.fim_id} «${tgt.text.slice(0, 16)}»`, px + 10, py + 54);
-
-    const tr = currentSim.voltage_traces;
-    let stepIdx = Math.min(tr.t_grid.length - 1, Math.floor(playheadMs / currentSim.dt_ms));
-    if (stepIdx < 0) stepIdx = 0;
-
-    const slotsMap = {};
-    for (const s of tgt.sources) slotsMap[s.slot] = s;
-    const bVals = [tr.v_b1[stepIdx] || 0, tr.v_b2[stepIdx] || 0, tr.v_b3[stepIdx] || 0];
-    const headVal = tr.v_head[stepIdx] || 0;
-    const headFired = tr.spike_times_head.some(t => t <= playheadMs);
-    const gx = px + pw - 52, gy = py + 150;
-
-    for (let s = 0; s < 3; s++) {
-      const bx = px + 36, by = py + 88 + s * 64;
-      const src = slotsMap[s];
-      const active = bVals[s] > 0.15;
-
-      ctx.strokeStyle = src ? (active ? '#38bdf8' : '#334155') : '#111827';
-      ctx.lineWidth = active ? 2.4 : 1.1;
-      ctx.beginPath();
-      ctx.moveTo(bx + 17, by);
-      ctx.lineTo(gx - 24, gy);
-      ctx.stroke();
-
-      ctx.fillStyle = src ? (active ? '#0c4a6e' : '#0f172a') : '#060911';
-      ctx.strokeStyle = src ? (active ? '#38bdf8' : '#475569') : '#1e293b';
-      ctx.beginPath();
-      ctx.arc(bx, by, 17, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-
-      ctx.fillStyle = src ? '#f8fafc' : '#475569';
-      ctx.font = 'bold 11px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(`Б${s+1}`, bx, by + 4);
-      ctx.textAlign = 'left';
-
-      if (src) {
-        ctx.fillStyle = '#cbd5e1';
-        ctx.font = '10.5px monospace';
-        ctx.fillText(`${src.text.slice(0, 12)} (${bVals[s].toFixed(2)})`, bx + 22, by - 3);
-      }
-    }
-
-    ctx.fillStyle = headFired ? '#064e3b' : (headVal >= 1.5 ? '#451a03' : '#0f172a');
-    ctx.strokeStyle = headFired ? '#4ade80' : '#fbbf24';
-    ctx.lineWidth = headFired ? 2.8 : 1.8;
-    ctx.beginPath();
-    ctx.arc(gx, gy, 24, 0, Math.PI * 2);
-    ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 13px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Г', gx, gy + 4);
-    ctx.font = '10.5px monospace';
-    ctx.fillStyle = headFired ? '#4ade80' : '#fbbf24';
-    ctx.fillText(`V=${headVal.toFixed(2)}`, gx, gy + 38);
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('Vth=2.0', gx, gy + 51);
-    ctx.textAlign = 'left';
-  }
-}
-
-document.getElementById('networkCanvas').addEventListener('click', function(e) {
-  const rect = this.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  for (let i = graphHitBoxes.length - 1; i >= 0; i--) {
-    const b = graphHitBoxes[i];
-    if (mx >= b.x1 && mx <= b.x2 && my >= b.y1 && my <= b.y2) {
-      selectSpikeRow(b.lvl, b.fim_id, b.time_ms);
-      break;
+let dagHitboxes = [];
+document.getElementById('dagCanvas').addEventListener('click', (e) => {
+  const rect = e.target.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  for (const hb of dagHitboxes) {
+    if (x >= hb.x && x <= hb.x + hb.w && y >= hb.y && y <= hb.y + hb.h) {
+      inspectFim(hb.level, hb.fim_id);
+      return;
     }
   }
 });
 
-function drawRasterPlot() {
-  const canvas = document.getElementById('rasterCanvas');
-  const {ctx, W, H} = setupHiDpiCanvas(canvas);
-  ctx.clearRect(0, 0, W, H);
+function drawNengoAll() {
   if (!currentSim) return;
+  drawDag();
+  drawRaster();
+  drawOscilloscope();
+}
 
-  const padL = 78, padR = 14, padT = 12, padB = 24;
-  const pw = W - padL - padR, ph = H - padT - padB;
-  const dur = Math.max(1, currentSim.duration_ms);
-  const rows = 11;
-  const rowH = ph / rows;
-  const xOf = t => padL + (t / dur) * pw;
+function drawDag() {
+  const { ctx, W, H } = setupCanvas('dagCanvas');
+  dagHitboxes = [];
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
 
-  for (const tp of currentSim.instinct_pulses_ms) {
-    const x = xOf(tp);
-    ctx.strokeStyle = 'rgba(248,113,113,0.22)';
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(x, padT);
-    ctx.lineTo(x, H - padB);
-    ctx.stroke();
+  // Nengo background engineering grid
+  ctx.strokeStyle = '#eef1f6';
+  ctx.lineWidth = 1;
+  for (let gx = 20; gx < W; gx += 20) {
+    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
   }
+  for (let gy = 20; gy < H; gy += 20) {
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+  }
+
+  const tf = currentSim.target_fim;
+  if (!tf) {
+    ctx.fillStyle = '#556070';
+    ctx.font = '12px Tahoma, sans-serif';
+    ctx.fillText('Нет активного модуля ФИМ для построения схемы ансамбля Nengo.', 16, 30);
+    return;
+  }
+
+  // Left-to-right classic Nengo Network schematic for target FIM:
+  // [Sources L-1] --> [Base Ensembles Б1, Б2, Б3] --> [Head Ensemble Г (V_th)]
+  const srcs = tf.sources || [];
+  const headX = Math.max(W - 210, 420);
+  const headY = H / 2 - 36;
+  const bnX = Math.max(headX * 0.52, 230);
+  const srcX = 24;
+
+  // Draw Head Ensemble Г
+  ctx.fillStyle = '#fff9db';
+  ctx.strokeStyle = '#2d3748';
+  ctx.lineWidth = 1.6;
+  ctx.fillRect(headX, headY, 175, 72);
+  ctx.strokeRect(headX, headY, 175, 72);
+  ctx.fillStyle = '#181c22';
+  ctx.font = 'bold 11.5px "DejaVu Sans Mono", monospace';
+  ctx.fillText(`Г: L${tf.level}#${tf.fim_id}`, headX + 8, headY + 18);
+  ctx.fillStyle = '#1d5fbf';
+  ctx.fillText(`«${tf.text.slice(0, 18)}»`, headX + 8, headY + 36);
+  ctx.fillStyle = '#556070';
+  ctx.font = '10.5px "DejaVu Sans Mono", monospace';
+  ctx.fillText(`V_th=${Number(tf.v_threshold).toFixed(2)} | W=${tf.window_ms}мс`, headX + 8, headY + 56);
+  dagHitboxes.push({ x: headX, y: headY, w: 175, h: 72, level: tf.level, fim_id: tf.fim_id });
+
+  // Active spike lookup at playhead
+  const activeHead = (currentSim.voltage_traces.spike_times_head || []).some(t => Math.abs(t - playheadMs) <= 24);
+  if (activeHead) {
+    ctx.strokeStyle = '#157347';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(headX - 2, headY - 2, 179, 76);
+  }
+
+  const slotYs = srcs.length === 2 ? [H * 0.28, H * 0.72] : [H * 0.20, H * 0.50, H * 0.80];
+
+  srcs.forEach((s, idx) => {
+    const cy = slotYs[idx];
+    const srcW = 160, srcH = 40;
+    const bnW = 128, bnH = 44;
+    const sy = cy - srcH / 2;
+    const by = cy - bnH / 2;
+
+    // Source box (level - 1)
+    ctx.fillStyle = s.level === 0 ? '#f1f5f9' : '#edf4ff';
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.2;
+    ctx.fillRect(srcX, sy, srcW, srcH);
+    ctx.strokeRect(srcX, sy, srcW, srcH);
+    ctx.fillStyle = '#181c22';
+    ctx.font = 'bold 11px "DejaVu Sans Mono", monospace';
+    ctx.fillText(`L${s.level}#${s.node_id} «${s.text.slice(0, 12)}»`, srcX + 7, sy + 17);
+    ctx.fillStyle = '#556070';
+    ctx.font = '10px Tahoma, sans-serif';
+    ctx.fillText(s.level === 0 ? 'Вход L0 (элемент)' : 'Клик -> открыть ФИМ', srcX + 7, sy + 32);
+    if (s.level > 0) dagHitboxes.push({ x: srcX, y: sy, w: srcW, h: srcH, level: s.level, fim_id: s.node_id });
+
+    // Arrow Source -> BN
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(srcX + srcW, cy);
+    ctx.lineTo(bnX, cy);
+    ctx.stroke();
+
+    // Base Neuron ensemble Б1/Б2/Б3
+    ctx.fillStyle = '#f8fafc';
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1.4;
+    ctx.fillRect(bnX, by, bnW, bnH);
+    ctx.strokeRect(bnX, by, bnW, bnH);
+    ctx.fillStyle = '#181c22';
+    ctx.font = 'bold 11px "DejaVu Sans Mono", monospace';
+    ctx.fillText(`${s.neuron} (слот ${s.slot})`, bnX + 7, by + 17);
+    ctx.fillStyle = '#157347';
+    ctx.font = '10.5px "DejaVu Sans Mono", monospace';
+    ctx.fillText(`${s.synapse_count}шт · w=${s.weight}`, bnX + 7, by + 34);
+
+    // Synapse connection BN -> Г with bundle line thickness
+    ctx.strokeStyle = '#1d5fbf';
+    ctx.lineWidth = Math.min(4.5, 1.2 + 0.5 * Number(s.synapse_count || 1));
+    ctx.beginPath();
+    ctx.moveTo(bnX + bnW, cy);
+    ctx.lineTo(headX, headY + 36);
+    ctx.stroke();
+
+    // Synapse label on wire
+    const mx = (bnX + bnW + headX) / 2 - 22;
+    const my = (cy + headY + 36) / 2 - 4;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(mx - 2, my - 10, 56, 13);
+    ctx.fillStyle = '#1d5fbf';
+    ctx.font = '10px "DejaVu Sans Mono", monospace';
+    ctx.fillText(`ΔV=${s.drive}`, mx, my);
+  });
+}
+
+function drawRaster() {
+  const { ctx, W, H } = setupCanvas('rasterCanvas');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+
+  const dur = Math.max(currentSim.duration_ms, 252);
+  const padL = 36, padR = 12, padT = 14, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const xOf = t => padL + (t / dur) * plotW;
+
+  // Axes
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+
+  // Y bands: L0..L9 (10 rows)
+  for (let l = 0; l <= 9; l++) {
+    const y = padT + ((9 - l) + 0.5) * (plotH / 10);
+    ctx.strokeStyle = '#eef1f6';
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px "DejaVu Sans Mono", monospace';
+    ctx.fillText('L' + l, 6, y + 3);
+  }
+
+  // Instinct cycle dashed lines
+  ctx.strokeStyle = '#d97706';
+  ctx.setLineDash([3, 3]);
+  (currentSim.instinct_pulses_ms || []).forEach(tp => {
+    const x = xOf(tp);
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke();
+  });
   ctx.setLineDash([]);
 
-  const labels = ['Инстинкт', 'Ур.0 (41)', 'Ур.1', 'Ур.2', 'Ур.3', 'Ур.4', 'Ур.5', 'Ур.6', 'Ур.7', 'Ур.8', 'Ур.9'];
-  ctx.font = '10px monospace';
-  for (let r = 0; r < rows; r++) {
-    const yMid = padT + (rows - 1 - r + 0.5) * rowH;
-    ctx.strokeStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.moveTo(padL, yMid + rowH * 0.48);
-    ctx.lineTo(W - padR, yMid + rowH * 0.48);
-    ctx.stroke();
-    ctx.fillStyle = r === 0 ? '#f87171' : '#94a3b8';
-    ctx.fillText(labels[r], 6, yMid + 3);
-  }
+  // Element spikes on L0
+  ctx.strokeStyle = '#64748b';
+  ctx.lineWidth = 1.5;
+  (currentSim.element_spikes || []).forEach(es => {
+    if (es.time_ms > playheadMs) return;
+    const x = xOf(es.time_ms);
+    const y = padT + 9.5 * (plotH / 10);
+    ctx.beginPath(); ctx.moveTo(x, y - 6); ctx.lineTo(x, y + 6); ctx.stroke();
+  });
 
-  for (const tp of currentSim.instinct_pulses_ms) {
-    if (tp > playheadMs) continue;
-    const x = xOf(tp), yMid = padT + (rows - 1 + 0.5) * rowH;
-    ctx.strokeStyle = '#f87171';
+  // FIM spikes L1..L9
+  (currentSim.fim_spikes || []).forEach(sp => {
+    if (sp.time_ms > playheadMs) return;
+    const x = xOf(sp.time_ms);
+    const y = padT + ((9 - sp.level) + 0.5) * (plotH / 10);
+    ctx.strokeStyle = sp.confidence < 0.99 ? '#d97706' : '#1d5fbf';
     ctx.lineWidth = 2.2;
-    ctx.beginPath();
-    ctx.moveTo(x, yMid - rowH * 0.36);
-    ctx.lineTo(x, yMid + rowH * 0.36);
-    ctx.stroke();
-  }
+    ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); ctx.stroke();
+  });
 
-  for (const es of currentSim.element_spikes) {
-    if (es.time_ms > playheadMs) continue;
-    const x = xOf(es.time_ms), yMid = padT + (rows - 2 + 0.5) * rowH;
-    ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    ctx.moveTo(x, yMid - rowH * 0.34);
-    ctx.lineTo(x, yMid + rowH * 0.34);
-    ctx.stroke();
-  }
+  // Playhead cursor
+  ctx.strokeStyle = '#dc2626';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(xOf(playheadMs), padT); ctx.lineTo(xOf(playheadMs), padT + plotH); ctx.stroke();
 
-  for (const fs of currentSim.fim_spikes) {
-    if (fs.time_ms > playheadMs) continue;
-    const r = fs.level + 1;
-    if (r >= rows) continue;
-    const x = xOf(fs.time_ms), yMid = padT + (rows - 1 - r + 0.5) * rowH;
-    const partial = fs.confidence < 0.99;
-    ctx.strokeStyle = partial ? '#fbbf24' : '#4ade80';
-    ctx.lineWidth = 2.6;
-    ctx.beginPath();
-    ctx.moveTo(x, yMid - rowH * 0.38);
-    ctx.lineTo(x, yMid + rowH * 0.38);
-    ctx.stroke();
-    if (fs.level >= 2) {
-      ctx.fillStyle = partial ? '#fde68a' : '#bbf7d0';
-      ctx.font = '9.5px monospace';
-      ctx.fillText(fs.text.slice(0, 12), Math.min(W - 82, x + 3), yMid + 3);
-    }
-  }
-
-  const px = xOf(playheadMs);
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.moveTo(px, padT);
-  ctx.lineTo(px, H - padB);
-  ctx.stroke();
-
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px monospace';
+  ctx.fillStyle = '#334155';
+  ctx.font = '10px "DejaVu Sans Mono", monospace';
   ctx.fillText('0 мс', padL, H - 6);
-  ctx.fillText(`${dur} мс`, W - 56, H - 6);
+  ctx.fillText(dur + ' мс', W - 52, H - 6);
+  document.getElementById('rasterMeta').textContent =
+    `L0: ${(currentSim.element_spikes || []).length} | ФИМ: ${(currentSim.fim_spikes || []).length}`;
 }
 
 function drawOscilloscope() {
-  const canvas = document.getElementById('oscCanvas');
-  const {ctx, W, H} = setupHiDpiCanvas(canvas);
-  ctx.clearRect(0, 0, W, H);
-  if (!currentSim || !currentSim.voltage_traces) return;
+  const { ctx, W, H } = setupCanvas('oscCanvas');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
 
   const tr = currentSim.voltage_traces;
-  const padL = 42, padR = 14, padT = 14, padB = 24;
-  const pw = W - padL - padR, ph = H - padT - padB;
-  const dur = Math.max(1, currentSim.duration_ms);
-  const vMax = 3.5;
+  if (!tr || !tr.t_grid || !tr.t_grid.length) return;
+  const dur = Math.max(currentSim.duration_ms, 252);
+  const padL = 36, padR = 12, padT = 16, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
 
-  const xOf = t => padL + (t / dur) * pw;
-  const yOf = v => padT + ph - (Math.min(vMax, Math.max(0, v)) / vMax) * ph;
+  const yMax = Math.max(3.6, tr.v_threshold + 0.8, ...tr.v_head);
+  const xOf = t => padL + (t / dur) * plotW;
+  const yOf = v => padT + plotH - (v / yMax) * plotH;
 
-  ctx.font = '10px monospace';
-  for (const val of [0, 1.0, 2.0, 3.0]) {
-    const y = yOf(val);
-    ctx.strokeStyle = val === 2.0 ? '#ef4444' : '#111827';
-    ctx.lineWidth = val === 2.0 ? 1.4 : 1;
-    if (val === 2.0) ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(W - padR, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = val === 2.0 ? '#f87171' : '#64748b';
-    ctx.fillText(val.toFixed(1), 8, y + 3);
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+
+  // Threshold V_th dashed line
+  const yTh = yOf(tr.v_threshold);
+  ctx.strokeStyle = '#dc2626';
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(padL, yTh); ctx.lineTo(W - padR, yTh); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#dc2626';
+  ctx.font = '10px "DejaVu Sans Mono", monospace';
+  ctx.fillText('Vth=' + tr.v_threshold.toFixed(2), padL + 4, yTh - 3);
+
+  let maxStep = 0;
+  for (let i = 0; i < tr.t_grid.length; i++) {
+    if (tr.t_grid[i] <= playheadMs) maxStep = i;
   }
 
-  for (const tp of currentSim.instinct_pulses_ms) {
-    const x = xOf(tp);
-    ctx.strokeStyle = 'rgba(248,113,113,0.18)';
-    ctx.beginPath();
-    ctx.moveTo(x, padT);
-    ctx.lineTo(x, H - padB);
-    ctx.stroke();
-  }
-
-  const maxStep = Math.min(tr.t_grid.length - 1, Math.floor(playheadMs / currentSim.dt_ms));
-  const series = [
-    {arr: tr.v_b1, color: '#60a5fa', width: 1.6},
-    {arr: tr.v_b2, color: '#c084fc', width: 1.6},
-    {arr: tr.v_b3, color: '#34d399', width: 1.6},
-    {arr: tr.v_head, color: '#fbbf24', width: 2.3},
+  const curves = [
+    { arr: tr.v_b1, color: '#0284c7', width: 1.3 },
+    { arr: tr.v_b2, color: '#9333ea', width: 1.3 },
+    { arr: tr.v_b3, color: '#d97706', width: 1.3 },
+    { arr: tr.v_head, color: '#15803d', width: 2.2 },
   ];
-  for (const s of series) {
-    if (maxStep < 1) continue;
-    ctx.strokeStyle = s.color;
-    ctx.lineWidth = s.width;
+  for (const c of curves) {
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth = c.width;
     ctx.beginPath();
     for (let i = 0; i <= maxStep; i++) {
-      const x = xOf(tr.t_grid[i]), y = yOf(s.arr[i]);
+      const x = xOf(tr.t_grid[i]), y = yOf(c.arr[i]);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
 
-  const px = xOf(playheadMs);
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(px, padT);
-  ctx.lineTo(px, H - padB);
-  ctx.stroke();
+  // Cursor
+  ctx.strokeStyle = '#181c22';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(xOf(playheadMs), padT); ctx.lineTo(xOf(playheadMs), padT + plotH); ctx.stroke();
+
+  // Legend
+  ctx.font = '10px "DejaVu Sans Mono", monospace';
+  ctx.fillStyle = '#0284c7'; ctx.fillText('Б1', W - 130, 12);
+  ctx.fillStyle = '#9333ea'; ctx.fillText('Б2', W - 102, 12);
+  ctx.fillStyle = '#d97706'; ctx.fillText('Б3', W - 74, 12);
+  ctx.fillStyle = '#15803d'; ctx.fillText('Г(sum)', W - 46, 12);
 
   const b1 = (tr.v_b1[maxStep] || 0).toFixed(2);
   const b2 = (tr.v_b2[maxStep] || 0).toFixed(2);
   const b3 = (tr.v_b3[maxStep] || 0).toFixed(2);
   const vh = (tr.v_head[maxStep] || 0).toFixed(2);
-  document.getElementById('oscVoltagesReadout').textContent =
-    `V_Б1=${b1}  V_Б2=${b2}  V_Б3=${b3}  |  V_Г=${vh} / ${tr.v_threshold.toFixed(2)}`;
-
-  ctx.fillStyle = '#94a3b8';
-  ctx.fillText('0 мс', padL, H - 6);
-  ctx.fillText(`${dur} мс`, W - 56, H - 6);
-}
-
-async function sendText(learn) {
-  const t0 = performance.now();
-  const text = document.getElementById('inputText').value;
-  const res = await fetch('/api/check', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text, learn})
-  });
-  const data = await res.json();
-  const dt = (performance.now() - t0).toFixed(1);
-  document.getElementById('latencyBadge').textContent = `Обработка: ${dt} мс · Вход: «${data.clean_text || '—'}»`;
-
-  const ansMain = document.getElementById('topAnswerMain');
-  const ansMeta = document.getElementById('topAnswerMeta');
-  if (!data.top_level) {
-    ansMain.className = 'readout-main muted';
-    ansMain.textContent = 'На входе пока нет узнанных ФИМов (можно дообучить).';
-    ansMeta.textContent = '';
-  } else {
-    ansMain.className = 'readout-main';
-    ansMain.textContent = `«${data.top_response_text}»`;
-    ansMeta.innerHTML = `Уровень ${data.top_level} · ` + data.top_fims.map(f => {
-      const confBadge = (f.confidence && f.confidence < 0.99) ? ` [2-из-3: ${f.confidence}]` : '';
-      return `<span class="slot-chip hit" onclick="inspectFim(${data.top_level}, ${f.fim_id})">L${data.top_level}#${f.fim_id} «${esc(f.text)}»${confBadge}</span>`;
-    }).join(' ');
-  }
-
-  const recMain = document.getElementById('recallMain');
-  const recMeta = document.getElementById('recallMeta');
-  if (data.recalled_level > data.top_level && data.recalled_text) {
-    recMain.className = 'readout-main';
-    recMain.style.color = '#86efac';
-    recMain.textContent = `«${data.recalled_text}»`;
-    recMeta.innerHTML = `Максимальный связанный узел: <span class="slot-chip hit" onclick="inspectFim(${data.recalled_level}, ${data.recalled_fim_id})">L${data.recalled_level}#${data.recalled_fim_id}</span>`;
-  } else {
-    recMain.className = 'readout-main muted';
-    recMain.style.color = '';
-    recMain.textContent = 'Совпадает с верхним узнанным уровнем';
-    recMeta.textContent = '';
-  }
-
-  if (data.recalled_explanation) renderExplanation(data.recalled_explanation);
-  else if (data.top_explanation) renderExplanation(data.top_explanation);
-
-  renderSummary(data.summary);
-  if (data.simulation) {
-    loadSimulation(data.simulation, true);
-  }
+  document.getElementById('oscReadout').textContent =
+    `Б1=${b1} Б2=${b2} Б3=${b3} | V_Г=${vh}/${tr.v_threshold.toFixed(2)}`;
 }
 
 window.addEventListener('resize', () => { if (currentSim) drawNengoAll(); });
-inspectLevel(3);
-setExample('мама мыла раму');
+loadConfig().then(() => inspectLevel(3)).then(() => setExample('мама раму'));
 </script>
 </body>
 </html>
@@ -1538,11 +1802,16 @@ setExample('мама мыла раму');
 
 
 class FIMHandler(BaseHTTPRequestHandler):
+    def _send_nocache_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+
     def _send_json(self, payload: Any, status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self._send_nocache_headers()
         self.end_headers()
         self.wfile.write(raw)
 
@@ -1550,6 +1819,9 @@ class FIMHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/summary":
             self._send_json(NET.summary())
+            return
+        if parsed.path == "/api/config":
+            self._send_json(NET.get_config())
             return
         if parsed.path == "/api/level":
             qs = parse_qs(parsed.query)
@@ -1562,9 +1834,10 @@ class FIMHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             lvl = int(qs.get("lvl", ["1"])[0])
             fid = int(qs.get("id", ["0"])[0])
+            probe_txt = qs.get("probe", [""])[0]
             exp = NET.explain_fim(lvl, fid, max_depth=5)
-            decoded = NET.decode_fim(lvl, fid)
-            exp["simulation"] = SIM.run(decoded, target_level=lvl, target_fim_id=fid, learn=False)
+            sim_input = probe_txt if probe_txt.strip() else NET.decode_fim(lvl, fid)
+            exp["simulation"] = SIM.run(sim_input, target_level=lvl, target_fim_id=fid, learn=False)
             self._send_json(exp)
             return
 
@@ -1572,17 +1845,68 @@ class FIMHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self._send_nocache_headers()
         self.end_headers()
         self.wfile.write(raw)
 
     def do_POST(self) -> None:
-        if self.path == "/api/check":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8")
-            req = json.loads(body or "{}")
-            result = analyze_input(req.get("text", ""), learn=bool(req.get("learn", False)))
-            self._send_json(result)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        req = json.loads(body or "{}")
+
+        try:
+            if self.path == "/api/check":
+                result = analyze_input(req.get("text", ""), learn=bool(req.get("learn", False)))
+                fl = req.get("focus_level")
+                ff = req.get("focus_fim_id")
+                if fl is not None and ff is not None and result.get("clean_text"):
+                    result["simulation"] = SIM.run(
+                        result["clean_text"],
+                        target_level=int(fl),
+                        target_fim_id=int(ff),
+                        learn=False,
+                    )
+                self._send_json(result)
+                return
+
+            if self.path == "/api/config":
+                updated = NET.update_config(req)
+                self._send_json({"config": updated, "summary": NET.summary()})
+                return
+
+            if self.path == "/api/fim/update":
+                lvl = int(req.get("level", 1))
+                fid = int(req.get("fim_id", 0))
+                exp = NET.update_fim(lvl, fid, req)
+                probe_txt = str(req.get("probe_text") or "").strip() or exp["text"]
+                sim = SIM.run(probe_txt, target_level=lvl, target_fim_id=fid, learn=False)
+                self._send_json({"fim": exp, "simulation": sim, "summary": NET.summary()})
+                return
+
+            if self.path == "/api/fim/create":
+                lvl = int(req.get("level", 1))
+                exp = NET.create_fim(lvl, req)
+                probe_txt = str(req.get("probe_text") or "").strip() or exp["text"]
+                sim = SIM.run(probe_txt, target_level=lvl, target_fim_id=exp["fim_id"], learn=False)
+                self._send_json({
+                    "fim": exp,
+                    "simulation": sim,
+                    "summary": NET.summary(),
+                    "config": NET.get_config(),
+                })
+                return
+
+            if self.path == "/api/fim/delete":
+                lvl = int(req.get("level", 1))
+                fid = int(req.get("fim_id", 0))
+                info = NET.delete_fim(lvl, fid)
+                self._send_json({"deleted": info, "summary": NET.summary()})
+                return
+
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
             return
+
         self._send_json({"error": "Not found"}, status=404)
 
     def log_message(self, format: str, *args: Any) -> None:

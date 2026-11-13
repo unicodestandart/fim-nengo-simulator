@@ -35,7 +35,7 @@ class FIMNengoSimulator:
             target_level is not None
             and target_fim_id is not None
             and target_level in self.net.levels
-            and target_fim_id in self.net.levels[target_level].fims
+            and 0 <= target_fim_id < len(self.net.levels[target_level].fims)
         ):
             return (target_level, target_fim_id)
 
@@ -50,12 +50,13 @@ class FIMNengoSimulator:
         for lvl in range(self.net.num_levels, 0, -1):
             fims = self.net.levels[lvl].fims
             if fims:
-                first_id = next(iter(fims))
-                return (lvl, first_id)
+                return (lvl, fims[0].fim_id)
         return None
 
     def _build_target_meta(self, lvl: int, fid: int) -> Dict[str, Any]:
         fim = self.net.levels[lvl].fims[fid]
+        counts = fim.get_counts()
+        weights = fim.get_weights()
         sources_meta: List[Dict[str, Any]] = []
         for idx, (slot, src_id) in enumerate(zip(fim.synapse_slots, fim.sources)):
             if lvl == 1:
@@ -70,6 +71,9 @@ class FIMNengoSimulator:
                     "node_id": src_id,
                     "text": src_text,
                     "source_index": idx,
+                    "synapse_count": counts[idx] if idx < len(counts) else 1,
+                    "weight": round(weights[idx] if idx < len(weights) else 1.05, 3),
+                    "drive": round(fim.slot_drive(idx), 3),
                 }
             )
         return {
@@ -77,7 +81,11 @@ class FIMNengoSimulator:
             "fim_id": fid,
             "text": self.net.decode_fim(lvl, fid),
             "synapse_slots": list(fim.synapse_slots),
-            "window_ms": level_window_ms(lvl),
+            "synapse_counts": list(counts),
+            "synapse_weights": [round(w, 3) for w in weights],
+            "v_threshold": round(fim.v_threshold, 3),
+            "window_ms": fim.effective_window_ms(self.net.levels[lvl].window_ms),
+            "custom_window_ms": fim.custom_window_ms,
             "sources": sources_meta,
         }
 
@@ -90,10 +98,14 @@ class FIMNengoSimulator:
     ) -> Dict[str, Any]:
         """Запускает спайковую симуляцию потока текста и возвращает спайки, импульсы инстинкта и V(t)."""
         clean = normalize_text(text)
+        tick_ms = self.net.tick_ms
+        instinct_cycle_ms = self.net.instinct_cycle_ms
+        dt_ms = self.net.dt_ms
+
         element_spikes: List[Dict[str, Any]] = []
         t_cur = 0
         for ch in clean:
-            t_cur += TICK_MS
+            t_cur += tick_ms
             element_spikes.append(
                 {
                     "time_ms": t_cur,
@@ -114,9 +126,11 @@ class FIMNengoSimulator:
             if ev.event_type not in ("recognition", "consolidation"):
                 continue
             fim = self.net.levels[ev.level].fims[ev.node_id]
+            counts = fim.get_counts()
+            weights = fim.get_weights()
             active_set = set(ev.active_slots) if ev.active_slots else set(fim.synapse_slots)
             sources_detail: List[Dict[str, Any]] = []
-            for slot, src_id in zip(fim.synapse_slots, fim.sources):
+            for idx, (slot, src_id) in enumerate(zip(fim.synapse_slots, fim.sources)):
                 child_text = (
                     self.net.id_to_char.get(src_id, "?")
                     if ev.level == 1
@@ -130,6 +144,9 @@ class FIMNengoSimulator:
                         "child_id": src_id,
                         "child_text": child_text,
                         "fired": slot in active_set,
+                        "synapse_count": counts[idx] if idx < len(counts) else 1,
+                        "weight": round(weights[idx] if idx < len(weights) else 1.05, 3),
+                        "drive": round(fim.slot_drive(idx), 3),
                     }
                 )
             fim_spikes.append(
@@ -142,7 +159,10 @@ class FIMNengoSimulator:
                     "confidence": round(float(ev.confidence), 2),
                     "active_slots": list(ev.active_slots) if ev.active_slots else list(fim.synapse_slots),
                     "synapse_slots": list(fim.synapse_slots),
-                    "window_ms": level_window_ms(ev.level),
+                    "synapse_counts": list(counts),
+                    "synapse_weights": [round(w, 3) for w in weights],
+                    "v_threshold": round(fim.v_threshold, 3),
+                    "window_ms": fim.effective_window_ms(self.net.levels[ev.level].window_ms),
                     "parents_count": len(self.net.parent_fims.get((ev.level, ev.node_id), ())),
                     "recognitions": fim.recognitions,
                     "training_stage": fim.training_stage,
@@ -168,8 +188,8 @@ class FIMNengoSimulator:
         tick_timeline = [
             {
                 "time_ms": t,
-                "tick_index": (t // TICK_MS) if (t % TICK_MS == 0) else None,
-                "instinct_pulse": (t % INSTINCT_CYCLE_MS == 0),
+                "tick_index": (t // tick_ms) if (t % tick_ms == 0) else None,
+                "instinct_pulse": (t % instinct_cycle_ms == 0),
                 "char": elem_by_t[t]["char"] if t in elem_by_t else None,
                 "node_id": elem_by_t[t]["node_id"] if t in elem_by_t else None,
                 "events": fim_by_t.get(t, []),
@@ -177,12 +197,12 @@ class FIMNengoSimulator:
             for t in all_times
         ]
 
-        max_ev_t = max([s["time_ms"] for s in fim_spikes] + [t_cur, TICK_MS])
-        duration_ms = ((max_ev_t + INSTINCT_CYCLE_MS - 1) // INSTINCT_CYCLE_MS) * INSTINCT_CYCLE_MS
-        if duration_ms < INSTINCT_CYCLE_MS:
-            duration_ms = INSTINCT_CYCLE_MS
+        max_ev_t = max([s["time_ms"] for s in fim_spikes] + [t_cur, tick_ms])
+        duration_ms = ((max_ev_t + instinct_cycle_ms - 1) // instinct_cycle_ms) * instinct_cycle_ms
+        if duration_ms < instinct_cycle_ms:
+            duration_ms = instinct_cycle_ms
 
-        instinct_pulses_ms = list(range(INSTINCT_CYCLE_MS, duration_ms + 1, INSTINCT_CYCLE_MS))
+        instinct_pulses_ms = list(range(instinct_cycle_ms, duration_ms + 1, instinct_cycle_ms))
 
         target_pair = self._choose_target_fim(fim_spikes, target_level, target_fim_id)
         target_meta = self._build_target_meta(*target_pair) if target_pair else None
@@ -205,9 +225,9 @@ class FIMNengoSimulator:
 
         return {
             "clean_text": clean,
-            "dt_ms": self.DT_MS,
-            "tick_ms": TICK_MS,
-            "instinct_cycle_ms": INSTINCT_CYCLE_MS,
+            "dt_ms": dt_ms,
+            "tick_ms": tick_ms,
+            "instinct_cycle_ms": instinct_cycle_ms,
             "duration_ms": duration_ms,
             "instinct_pulses_ms": instinct_pulses_ms,
             "element_spikes": element_spikes,
@@ -227,7 +247,7 @@ class FIMNengoSimulator:
         target_pair: Optional[Tuple[int, int]],
         target_meta: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        dt = self.DT_MS
+        dt = max(1, int(self.net.dt_ms))
         t_grid = list(range(0, duration_ms + 1, dt))
         n_steps = len(t_grid)
 
@@ -254,7 +274,7 @@ class FIMNengoSimulator:
                 "v_b3": v_b3,
                 "v_head": v_head,
                 "v_instinct": v_instinct,
-                "v_threshold": self.V_THRESHOLD,
+                "v_threshold": self.net.default_v_threshold,
                 "spike_times_b1": spike_times_b1,
                 "spike_times_b2": spike_times_b2,
                 "spike_times_b3": spike_times_b3,
@@ -263,29 +283,32 @@ class FIMNengoSimulator:
 
         target_lvl, target_fid = target_pair
         fim = self.net.levels[target_lvl].fims[target_fid]
-        win_ms = float(level_window_ms(target_lvl))
-        # Медленная утечка внутри окна W_L, чтобы 2-3 входных спайка уверенно накапливались
-        decay_base = math.exp(-dt / max(win_ms * 1.4, float(dt)))
+        v_th = float(fim.v_threshold)
+        win_ms = float(fim.effective_window_ms(self.net.levels[target_lvl].window_ms))
+        tau_factor = max(0.1, float(self.net.tau_leak_factor))
+        decay_base = math.exp(-dt / max(win_ms * tau_factor, float(dt)))
 
-        # Сопоставляем входящие спайки уровня target_lvl - 1 по слотам (0, 1, 2)
-        src_to_slots: Dict[int, List[int]] = {}
-        for slot, src_id in zip(fim.synapse_slots, fim.sources):
-            src_to_slots.setdefault(src_id, []).append(slot)
+        # Сопоставляем входящие спайки уровня target_lvl - 1 по слотам (0, 1, 2) и индексам источников
+        src_to_entries: Dict[int, List[Tuple[int, int]]] = {}
+        for pos, (slot, src_id) in enumerate(zip(fim.synapse_slots, fim.sources)):
+            src_to_entries.setdefault(src_id, []).append((slot, pos))
 
-        incoming_by_step: Dict[int, List[int]] = {}
+        incoming_by_step: Dict[int, List[Tuple[int, float]]] = {}
         if target_lvl == 1:
             for sp in element_spikes:
-                slots = src_to_slots.get(sp["node_id"])
-                if slots:
+                entries = src_to_entries.get(sp["node_id"])
+                if entries:
                     step_t = min(duration_ms, ((sp["time_ms"] + dt // 2) // dt) * dt)
-                    incoming_by_step.setdefault(step_t, []).extend(slots)
+                    for slot, pos in entries:
+                        incoming_by_step.setdefault(step_t, []).append((slot, fim.slot_drive(pos)))
         else:
             for sp in fim_spikes:
                 if sp["level"] == target_lvl - 1:
-                    slots = src_to_slots.get(sp["fim_id"])
-                    if slots:
+                    entries = src_to_entries.get(sp["fim_id"])
+                    if entries:
                         step_t = min(duration_ms, ((sp["time_ms"] + dt // 2) // dt) * dt)
-                        incoming_by_step.setdefault(step_t, []).extend(slots)
+                        for slot, pos in entries:
+                            incoming_by_step.setdefault(step_t, []).append((slot, fim.slot_drive(pos)))
 
         head_fire_steps: set[int] = set()
         for sp in fim_spikes:
@@ -312,10 +335,10 @@ class FIMNengoSimulator:
                 if b[s] < 0.01:
                     b[s] = 0.0
 
-            # Входящие спайки на Б1 / Б2 / Б3
+            # Входящие спайки на Б1 / Б2 / Б3 с индивидуальным весом и числом синапсов
             slots_now = incoming_by_step.get(t, ())
-            for slot in slots_now:
-                b[slot] = 1.05
+            for slot, drive_val in slots_now:
+                b[slot] = drive_val
                 last_spike_t[slot] = t
                 if slot == 0:
                     spike_times_b1.append(t)
@@ -328,14 +351,13 @@ class FIMNengoSimulator:
             v_sum = b[0] + b[1] + b[2]
             fired_now = False
             if t in head_fire_steps:
-                v_sum = max(v_sum, 2.15 if len(fim.sources) == 2 else (3.1 if v_sum >= 2.8 else 2.25))
+                v_sum = max(v_sum, v_th + 0.15)
                 fired_now = True
-            elif t > cooldown_until and v_sum >= self.V_THRESHOLD:
-                # Ассоциативное срабатывание порога, если оба импульса попали в окно в порядке
+            elif t > cooldown_until and v_sum + 1e-9 >= v_th:
                 fired_now = True
 
             if fired_now:
-                v_head[idx] = round(max(v_sum, 2.2), 3)
+                v_head[idx] = round(max(v_sum, v_th + 0.15), 3)
                 spike_times_head.append(t)
                 cooldown_until = t + dt
                 # Записываем текущие Б до рефрактерного сброса на следующем шаге
@@ -356,7 +378,7 @@ class FIMNengoSimulator:
             "v_b3": v_b3,
             "v_head": v_head,
             "v_instinct": v_instinct,
-            "v_threshold": self.V_THRESHOLD,
+            "v_threshold": round(v_th, 3),
             "spike_times_b1": spike_times_b1,
             "spike_times_b2": spike_times_b2,
             "spike_times_b3": spike_times_b3,
