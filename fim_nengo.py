@@ -103,7 +103,7 @@ class FIMNengoSimulator:
             )
 
         if learn:
-            raw_events = self.net.process_text(clean)
+            raw_events = self.net.feed_stream(clean)
         else:
             raw_events = self.net.probe_stream(clean)
 
@@ -113,6 +113,25 @@ class FIMNengoSimulator:
                 continue
             if ev.event_type not in ("recognition", "consolidation"):
                 continue
+            fim = self.net.levels[ev.level].fims[ev.node_id]
+            active_set = set(ev.active_slots) if ev.active_slots else set(fim.synapse_slots)
+            sources_detail: List[Dict[str, Any]] = []
+            for slot, src_id in zip(fim.synapse_slots, fim.sources):
+                child_text = (
+                    self.net.id_to_char.get(src_id, "?")
+                    if ev.level == 1
+                    else self.net.decode_fim(ev.level - 1, src_id)
+                )
+                sources_detail.append(
+                    {
+                        "slot": slot,
+                        "neuron": f"Б{slot + 1}",
+                        "child_level": ev.level - 1,
+                        "child_id": src_id,
+                        "child_text": child_text,
+                        "fired": slot in active_set,
+                    }
+                )
             fim_spikes.append(
                 {
                     "level": ev.level,
@@ -121,11 +140,42 @@ class FIMNengoSimulator:
                     "time_ms": ev.time_ms,
                     "event_type": ev.event_type,
                     "confidence": round(float(ev.confidence), 2),
-                    "active_slots": list(ev.active_slots),
+                    "active_slots": list(ev.active_slots) if ev.active_slots else list(fim.synapse_slots),
+                    "synapse_slots": list(fim.synapse_slots),
+                    "window_ms": level_window_ms(ev.level),
+                    "parents_count": len(self.net.parent_fims.get((ev.level, ev.node_id), ())),
+                    "recognitions": fim.recognitions,
+                    "training_stage": fim.training_stage,
+                    "sources_detail": sources_detail,
                 }
             )
 
         fim_spikes.sort(key=lambda item: (item["time_ms"], item["level"], item["fim_id"]))
+
+        elem_by_t = {es["time_ms"]: es for es in element_spikes}
+        fim_by_t: Dict[int, List[Dict[str, Any]]] = {}
+        for sp in fim_spikes:
+            fim_by_t.setdefault(sp["time_ms"], []).append(
+                {
+                    "level": sp["level"],
+                    "fim_id": sp["fim_id"],
+                    "text": sp["text"],
+                    "confidence": sp["confidence"],
+                    "event_type": sp["event_type"],
+                }
+            )
+        all_times = sorted(set(elem_by_t.keys()) | set(fim_by_t.keys()))
+        tick_timeline = [
+            {
+                "time_ms": t,
+                "tick_index": (t // TICK_MS) if (t % TICK_MS == 0) else None,
+                "instinct_pulse": (t % INSTINCT_CYCLE_MS == 0),
+                "char": elem_by_t[t]["char"] if t in elem_by_t else None,
+                "node_id": elem_by_t[t]["node_id"] if t in elem_by_t else None,
+                "events": fim_by_t.get(t, []),
+            }
+            for t in all_times
+        ]
 
         max_ev_t = max([s["time_ms"] for s in fim_spikes] + [t_cur, TICK_MS])
         duration_ms = ((max_ev_t + INSTINCT_CYCLE_MS - 1) // INSTINCT_CYCLE_MS) * INSTINCT_CYCLE_MS
@@ -162,6 +212,7 @@ class FIMNengoSimulator:
             "instinct_pulses_ms": instinct_pulses_ms,
             "element_spikes": element_spikes,
             "fim_spikes": fim_spikes,
+            "tick_timeline": tick_timeline,
             "highest_recognition": highest_recognition,
             "target_fim": target_meta,
             "voltage_traces": voltage_traces,

@@ -14,9 +14,10 @@
 
 from __future__ import annotations
 
+import os
 import random
 import time
-from typing import List
+from typing import List, Tuple
 from fim_algorithm import InstinctNetwork, LETTERS
 
 
@@ -141,12 +142,52 @@ def _compose_level_units(prev_units: List[str], count: int, seed: int) -> List[s
     return units
 
 
-def train_default_network() -> InstinctNetwork:
+def _load_corpus_file(path: str) -> Tuple[List[str], List[str]]:
+    words: List[str] = []
+    sentences: List[str] = []
+    if not os.path.exists(path):
+        return words, sentences
+    mode = None
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line == "[WORDS]":
+                mode = "words"
+                continue
+            if line == "[SENTENCES]":
+                mode = "sentences"
+                continue
+            if mode == "words":
+                words.append(line)
+            elif mode == "sentences":
+                sentences.append(line)
+    return words, sentences
+
+
+def _train_russian_corpus(net: InstinctNetwork, corpus_path: str) -> None:
+    """Дообучает сеть на большом русском корпусе (частые слова + предложения RuCoLA по главам)."""
+    words, sentences = _load_corpus_file(corpus_path)
+    for w in words:
+        piece = w + " "
+        net.feed_stream(piece, flush_end=True, stage="Корпус СЧР: частые слова")
+        net.feed_stream(piece, flush_end=True, stage="Корпус СЧР: частые слова")
+
+    chapter_size = 32
+    for idx in range(0, len(sentences), chapter_size):
+        chapter = " ".join(sentences[idx : idx + chapter_size])
+        stage_name = f"Корпус RuCoLA: глава #{idx // chapter_size + 1}"
+        for _ in range(9):
+            net.feed_stream(chapter, flush_end=True, stage=stage_name)
+
+
+def train_default_network(include_corpus: bool = True) -> InstinctNetwork:
     """
-    Обучает абсолютно пустую сеть с нуля по 9 этапам взросления ребёнка:
-    каждый уровень строится строго из 2–3 освоенных единиц предыдущего уровня.
+    Обучает абсолютно пустую сеть (ёмкость 1 000 000 ФИМ на уровень) с нуля:
+    сначала 9 этапов взросления ребёнка, затем большой русский корпус слов и текстов.
     """
-    net = InstinctNetwork(num_levels=9, max_fims_per_level=5000)
+    net = InstinctNetwork(num_levels=9, max_fims_per_level=1_000_000)
 
     # Этап 1: Слоги (Уровень 1)
     for syl in STAGE1_SYLLABLES_3:
@@ -188,11 +229,15 @@ def train_default_network() -> InstinctNetwork:
             net.feed_stream(u, flush_end=True, stage=stage_name)
             net.feed_stream(u, flush_end=True, stage=stage_name)
 
+    if include_corpus:
+        corpus_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus_ru.txt")
+        _train_russian_corpus(net, corpus_path)
+
     return net
 
 
 def main() -> None:
-    empty_check = InstinctNetwork(num_levels=9, max_fims_per_level=5000)
+    empty_check = InstinctNetwork(num_levels=9, max_fims_per_level=1_000_000)
     print("Проверка пустой сети до обучения:", {l: len(p.fims) for l, p in empty_check.levels.items()})
 
     t0 = time.perf_counter()
@@ -204,14 +249,15 @@ def main() -> None:
         default=0,
     )
 
-    print(f"Поэтапное обучение (9 этапов) завершено за {dt:.2f} сек.")
-    print(f"Макс. длина ФИМ на уровне 2: {max_lvl2_len} симв. (лимит <= 6)")
-    print("\n=== СТАТИСТИКА ПО ВСЕМ 9 УРОВНЯМ ===")
+    total_cons = sum(st["consolidated_fims"] for st in net.summary().values())
+    print(f"Обучение (детский этап + большой русский корпус) завершено за {dt:.2f} сек.")
+    print(f"Макс. длина ФИМ на уровне 2: {max_lvl2_len} симв. (лимит <= 6) | Всего ФИМ: {total_cons}")
+    print("\n=== СТАТИСТИКА ПО ВСЕМ 9 УРОВНЯМ (1 000 000 ФИМ/уровень) ===")
     for lvl, st in net.summary().items():
         print(
             f"Уровень {lvl} (окно {st['window_ms']:6d} мс): "
-            f"консолидировано ФИМ = {st['consolidated_fims']:4d} / 5000 | "
-            f"узнаваний = {st['total_recognitions']:6d}"
+            f"консолидировано ФИМ = {st['consolidated_fims']:6d} / {st['max_fims']} | "
+            f"узнаваний = {st['total_recognitions']:8d}"
         )
 
     print("\n=== ПРИМЕРЫ ФИМОВ ПО УРОВНЯМ (2..6) ===")

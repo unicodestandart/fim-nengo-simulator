@@ -58,6 +58,7 @@ class FIM:
     created_at_ms: int = 0
     training_context: str = ""
     training_stage: str = ""
+    decoded_text: str = ""
 
 
 @dataclass
@@ -82,7 +83,7 @@ class LevelPool:
         self,
         level: int,
         get_decoded_text: Callable[[int, int], str],
-        max_fims: int = 5000,
+        max_fims: int = 1_000_000,
     ) -> None:
         self.level = level
         self.max_fims = max_fims
@@ -115,6 +116,7 @@ class LevelPool:
 
         fim_id = len(self.fims)
         slots = (0, 2) if len(seq) == 2 else (0, 1, 2)
+        decoded = "".join(self.get_decoded_text(self.level - 1, s) for s in seq)
         fim = FIM(
             fim_id=fim_id,
             level=self.level,
@@ -124,6 +126,7 @@ class LevelPool:
             created_at_ms=time_ms,
             training_context=context_str,
             training_stage=stage_str,
+            decoded_text=decoded,
         )
         self.fims.append(fim)
         self.pattern_index[seq] = fim_id
@@ -161,9 +164,10 @@ class LevelPool:
 
         seq3 = (self.buffer[0][1], self.buffer[1][1], self.buffer[2][1])
         seq2 = (self.buffer[0][1], self.buffer[1][1])
+        span3 = self.buffer[2][0] - self.buffer[0][0]
 
-        # Случай 1: 3-сигнальный паттерн уже выучен -> узнавание
-        if seq3 in self.pattern_index:
+        # Случай 1: 3-сигнальный паттерн уже выучен и умещается в окно уровня W_L -> узнавание
+        if span3 <= self.window_ms and seq3 in self.pattern_index:
             ev = self._emit_seq(seq3, self.buffer[2][0], context_str=context_str, stage_str=stage_str)
             self.buffer.clear()
             self.window_start_ms = None
@@ -180,16 +184,17 @@ class LevelPool:
                 events.append(ev)
             return events
 
-        # Случай 3: новая консолидация
-        if self.level == 2:
-            len3 = sum(len(self.get_decoded_text(1, s)) for s in seq3)
-            if len3 > 6:
-                ev = self._emit_seq(seq2, self.buffer[1][0], context_str=context_str, stage_str=stage_str)
-                self.buffer = [self.buffer[2]]
-                self.window_start_ms = self.buffer[0][0]
-                if ev is not None:
-                    events.append(ev)
-                return events
+        # Случай 3: новая консолидация (соблюдаем физическое окно W_L и лимит 6 символов на Ур. 2)
+        too_wide = (span3 > self.window_ms) or (
+            self.level == 2 and sum(len(self.get_decoded_text(1, s)) for s in seq3) > 6
+        )
+        if too_wide:
+            ev = self._emit_seq(seq2, self.buffer[1][0], context_str=context_str, stage_str=stage_str)
+            self.buffer = [self.buffer[2]]
+            self.window_start_ms = self.buffer[0][0]
+            if ev is not None:
+                events.append(ev)
+            return events
 
         ev = self._emit_seq(seq3, self.buffer[2][0], context_str=context_str, stage_str=stage_str)
         self.buffer.clear()
@@ -217,9 +222,9 @@ class LevelPool:
 
 
 class InstinctNetwork:
-    """9-уровневая сеть ФИМ с уровнем 0 (41 элемент), пустыми пулами ФИМ и аналитикой."""
+    """9-уровневая сеть ФИМ с уровнем 0 (41 элемент), пулом 1 млн/уровень и аналитикой."""
 
-    def __init__(self, num_levels: int = 9, max_fims_per_level: int = 5000) -> None:
+    def __init__(self, num_levels: int = 9, max_fims_per_level: int = 1_000_000) -> None:
         self.num_levels = num_levels
         self.char_to_id: Dict[str, int] = {ch: i for i, ch in enumerate(RUSSIAN_ALPHABET)}
         self.id_to_char: Dict[int, str] = {i: ch for i, ch in enumerate(RUSSIAN_ALPHABET)}
@@ -278,6 +283,8 @@ class InstinctNetwork:
             ):
                 self._propagate_up(ev, out, context_str, stage_str)
         self.events_log.extend(out)
+        if len(self.events_log) > 2000:
+            del self.events_log[:-1000]
         return out
 
     def feed_stream(
@@ -307,6 +314,8 @@ class InstinctNetwork:
             out.extend(self.flush_all(context_str=tail_ctx, stage_str=stage))
         else:
             self.events_log.extend(out)
+        if len(self.events_log) > 2000:
+            del self.events_log[:-1000]
         return out
 
     def probe_stream(self, text: str) -> List[SignalEvent]:
@@ -411,8 +420,9 @@ class InstinctNetwork:
 
             seq3 = (buf[0][1], buf[1][1], buf[2][1])
             seq2 = (buf[0][1], buf[1][1])
+            span3 = buf[2][0] - buf[0][0]
 
-            fid3 = lookup_consolidated(lvl, seq3)
+            fid3 = lookup_consolidated(lvl, seq3) if span3 <= pool.window_ms else None
             if fid3 is not None:
                 t_ev = buf[2][0]
                 slots = pool.fims[fid3].synapse_slots
@@ -576,7 +586,10 @@ class InstinctNetwork:
         if level == 0:
             return self.id_to_char.get(fim_id, "?")
         fim = self.levels[level].fims[fim_id]
-        return "".join(self.decode_fim(level - 1, src) for src in fim.sources)
+        if fim.decoded_text:
+            return fim.decoded_text
+        fim.decoded_text = "".join(self.decode_fim(level - 1, src) for src in fim.sources)
+        return fim.decoded_text
 
     def summary(self) -> Dict[int, Dict[str, int]]:
         stats: Dict[int, Dict[str, int]] = {}
@@ -584,6 +597,8 @@ class InstinctNetwork:
             cons_fims = [f for f in pool.fims if f.consolidated]
             stats[lvl] = {
                 "window_ms": pool.window_ms,
+                "max_fims": pool.max_fims,
+                "allocated_fims": len(pool.fims),
                 "consolidated_fims": len(cons_fims),
                 "total_recognitions": sum(f.recognitions for f in cons_fims),
             }
