@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SNN «Луковица» — 3D-конструктор спайковой сети</title>
+<style>
+  :root{
+    --hud-bg: rgba(14,18,24,0.62);
+    --hud-border: rgba(255,255,255,0.09);
+    --txt: #d6dde6;
+    --dim: #7d8896;
+    --green: #19e68c;
+    --red: #ff4a57;
+    --blue: #7fd4ff;
+    --warm: #ffe9a3;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#05070a;color:var(--txt);
+    font:13px/1.4 "Inter","Segoe UI",system-ui,-apple-system,sans-serif}
+  #app{position:fixed;inset:0;touch-action:none}
+  #app canvas{display:block;outline:none}
+  .hud{background:var(--hud-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--hud-border);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+  .mono{font-family:"JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace}
+
+  /* ---------- верхняя плашка телеметрии ---------- */
+  #topbar{position:fixed;top:12px;left:12px;right:352px;display:flex;align-items:center;gap:18px;
+    padding:8px 14px;z-index:5;transition:right .3s ease;flex-wrap:wrap}
+  body.panel-collapsed #topbar{right:56px}
+  #topbar .brand{font-weight:600;letter-spacing:.3px;white-space:nowrap}
+  #topbar .brand b{color:var(--green)}
+  .tm{display:flex;flex-direction:column;min-width:64px}
+  .tm .k{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  .tm .v{font-size:14px}
+  .tm.big .v{font-size:16px;color:var(--green);font-weight:600}
+  .tm.big.fired .v{color:var(--warm)}
+
+  /* ---------- правая панель ---------- */
+  #panel{position:fixed;top:12px;right:12px;bottom:84px;width:328px;z-index:6;display:flex;flex-direction:column;
+    transition:transform .3s ease}
+  body.panel-collapsed #panel{transform:translateX(calc(100% - 34px))}
+  #panel .head{display:flex;align-items:center;gap:6px;padding:8px 8px 0 8px}
+  #collapseBtn{width:26px;height:26px;border-radius:6px;border:1px solid var(--hud-border);
+    background:rgba(255,255,255,.04);color:var(--txt);cursor:pointer;flex:0 0 auto}
+  .tabs{display:flex;gap:4px;flex:1}
+  .tab{flex:1;padding:6px 8px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--dim);
+    cursor:pointer;font-size:12px}
+  .tab.active{background:rgba(255,255,255,.06);border-color:var(--hud-border);color:var(--txt)}
+  .tabpane{display:none;padding:12px 14px;overflow-y:auto;flex:1}
+  .tabpane.active{display:block}
+  .row{margin-bottom:14px}
+  .row label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+  .row label span.val{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--green)}
+  .row small{display:block;color:var(--dim);font-size:11px;margin-top:3px}
+  input[type=range]{width:100%;accent-color:var(--green);height:18px}
+  .seg{display:flex;border:1px solid var(--hud-border);border-radius:7px;overflow:hidden}
+  .seg button{flex:1;padding:6px 4px;background:transparent;color:var(--dim);border:0;cursor:pointer;font-size:12px}
+  .seg button.active{background:rgba(25,230,140,.14);color:var(--green)}
+  .switch{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none}
+  .switch input{display:none}
+  .switch > span{flex:0 0 auto;margin-left:10px}
+  .switch .knob{display:inline-block;vertical-align:middle;width:36px;height:20px;border-radius:10px;background:rgba(255,255,255,.12);position:relative;transition:.2s}
+  .switch .knob::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:#c9d1da;transition:.2s}
+  .switch input:checked + .knob{background:rgba(25,230,140,.45)}
+  .switch input:checked + .knob::after{left:18px;background:#fff}
+  h4{margin:16px 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim);font-weight:600}
+  #inspector{font-size:12px;background:rgba(0,0,0,.25);border:1px solid var(--hud-border);border-radius:8px;padding:8px;min-height:64px}
+  #inspector .chip{display:inline-block;padding:1px 6px;margin:2px;border-radius:5px;font-family:ui-monospace,Menlo,monospace;font-size:11px;
+    background:rgba(255,255,255,.06);color:var(--dim)}
+  #inspector .chip.on{background:rgba(255,233,163,.16);color:var(--warm)}
+  .legend{display:grid;grid-template-columns:14px 1fr;gap:6px 8px;font-size:12px;align-items:center}
+  .legend i{width:12px;height:12px;border-radius:3px;display:inline-block}
+
+  /* ---------- нижний док ---------- */
+  #dock{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;
+    padding:8px 10px;z-index:5}
+  .btn{padding:8px 14px;border-radius:8px;border:1px solid var(--hud-border);background:rgba(255,255,255,.05);
+    color:var(--txt);cursor:pointer;font-size:13px;white-space:nowrap}
+  .btn:hover{background:rgba(255,255,255,.1)}
+  .btn.primary{background:rgba(25,230,140,.16);border-color:rgba(25,230,140,.45);color:#bfffe1}
+  .btn.primary:hover{background:rgba(25,230,140,.26)}
+  .dock-sep{width:1px;height:26px;background:var(--hud-border)}
+  .drumsel button{min-width:40px}
+
+  /* ---------- 3D-метки ---------- */
+  .lbl{padding:2px 7px;border-radius:5px;font-size:11px;white-space:nowrap;pointer-events:none;
+    background:rgba(8,10,14,.72);border:1px solid rgba(255,255,255,.1);color:#cfd6de;transform:translateY(-14px)}
+  .lbl.core{border-color:rgba(255,190,90,.45)}
+  .lbl.red{border-color:rgba(255,74,87,.55);color:#ffb3b9}
+  .lbl.green{border-color:rgba(25,230,140,.55);color:#a8ffd6}
+  .lbl.blue{border-color:rgba(127,212,255,.6);color:#cdeeff}
+  .lbl.white{border-color:rgba(220,228,236,.4)}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:var(--dim);z-index:20;
+    background:#05070a;font-size:14px}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="loading">Загрузка Three.js…</div>
+<div id="app"></div>
+
+<!-- ======== Верхняя телеметрия ======== -->
+<div id="topbar" class="hud">
+  <div class="brand">SNN · <b>Луковица</b></div>
+  <div class="tm big"><span class="k">Активных синапсов при контакте</span><span class="v mono" id="tmActive">0</span></div>
+  <div class="tm big fired"><span class="k">Сработало ≥ порога</span><span class="v mono" id="tmFired">0</span></div>
+  <div class="tm"><span class="k">Барабан</span><span class="v mono" id="tmDrum">G1</span></div>
+  <div class="tm"><span class="k">θ</span><span class="v mono" id="tmTheta">0.0°</span></div>
+  <div class="tm"><span class="k">Сектор</span><span class="v mono" id="tmSector">0 / 10</span></div>
+  <div class="tm"><span class="k">Спайков всего</span><span class="v mono" id="tmTotal">0</span></div>
+  <div class="tm"><span class="k">Время сети</span><span class="v mono" id="tmTime">0 мс</span></div>
+  <div class="tm"><span class="k">FPS</span><span class="v mono" id="tmFps">–</span></div>
+</div>
+
+<!-- ======== Правая панель ======== -->
+<aside id="panel" class="hud">
+  <div class="head">
+    <button id="collapseBtn" title="Свернуть / развернуть панель">›</button>
+    <div class="tabs">
+      <button class="tab active" data-tab="t1">Спайки и Nengo-параметры</button>
+      <button class="tab" data-tab="t2">Геометрия ансамбля</button>
+    </div>
+  </div>
+
+  <div class="tabpane active" id="t1">
+    <div class="row">
+      <label>Число синапсов при контакте (Fan-out K) <span class="val" id="vK">7</span></label>
+      <input type="range" id="sK" min="1" max="16" step="1" value="7">
+      <small>Сколько базовых нейронов следующего круга одновременно возбуждает головной нейрон при прокрутке барабана.</small>
+    </div>
+    <div class="row">
+      <label>Порог срабатывания (Firing Threshold) <span class="val" id="vThr">-55 мВ</span></label>
+      <input type="range" id="sThr" min="-70" max="-40" step="1" value="-55">
+      <small>Покой −70 мВ. Один синапс даёт ВПСП 24 мВ × вес нейрона × усиление дендрита.</small>
+    </div>
+    <div class="row">
+      <label>Постоянная времени спайка (Tau / Refractory) <span class="val" id="vTau">40 мс</span></label>
+      <input type="range" id="sTau" min="5" max="100" step="1" value="40">
+      <small>Удержание подсветки сработавших нейронов, рефрактерность и затухание аксональной вспышки.</small>
+    </div>
+    <div class="row">
+      <label>Вес дендрита инстинкта (Instinct Dendrite Gain) <span class="val" id="vGain">1.00×</span></label>
+      <input type="range" id="sGain" min="0.1" max="3" step="0.05" value="1">
+      <small>Усиление красного кольца: частота фоновой пульсации головного нейрона и сила его спайка.</small>
+    </div>
+    <div class="row">
+      <label>Режим шага аксонального барабана</label>
+      <div class="seg" id="segMode">
+        <button data-mode="discrete" class="active">Дискретный (10 секторов)</button>
+        <button data-mode="continuous">Непрерывный</button>
+      </div>
+    </div>
+    <div class="row">
+      <label class="switch">Удержание контакта (Latch / Hold Contact)
+        <span><input type="checkbox" id="cLatch"><span class="knob"></span></span>
+      </label>
+      <small>Замораживает прокрутку и время сети, чтобы проинспектировать активированные K нейронов.</small>
+    </div>
+
+    <h4>Инспектор последнего контакта</h4>
+    <div id="inspector"><span style="color:var(--dim)">Прокрутите зелёный барабан мышью или нажмите «Импульс».</span></div>
+
+    <h4>Легенда</h4>
+    <div class="legend">
+      <i style="background:#ffb84d"></i><span>Ядро: пейсмекеры M / A и стартовые нейроны</span>
+      <i style="background:#19e68c"></i><span>Зелёные кольца — аксональные барабаны (без нейронов)</span>
+      <i style="background:#ff4a57"></i><span>Красные кольца — дендритные контуры инстинкта</span>
+      <i style="background:#7fd4ff"></i><span>Голубой — головной пирамидный нейрон</span>
+      <i style="background:#9aa3ad"></i><span>Серые — базовые нейроны (белые кольца)</span>
+      <i style="background:#ffe9a3"></i><span>Жёлтая вспышка — нейрон сработал</span>
+    </div>
+  </div>
+
+  <div class="tabpane" id="t2">
+    <div class="row">
+      <label>Общий масштаб луковицы (Scale) <span class="val" id="vScale">1.00×</span></label>
+      <input type="range" id="sScale" min="0.5" max="3.5" step="0.05" value="1">
+    </div>
+    <div class="row">
+      <label>Плотность базовых нейронов в слое <span class="val" id="vDens">24</span></label>
+      <input type="range" id="sDens" min="12" max="64" step="1" value="24">
+      <small>Узлов на каждое белое кольцо; ансамбли перестраиваются динамически.</small>
+    </div>
+    <div class="row">
+      <label>Ширина аксональных колец (зелёные) <span class="val" id="vGW">0.30</span></label>
+      <input type="range" id="sGW" min="0.12" max="0.6" step="0.01" value="0.3">
+    </div>
+    <div class="row">
+      <label>Ширина дендритных колец (красные) <span class="val" id="vRW">0.12</span></label>
+      <input type="range" id="sRW" min="0.04" max="0.3" step="0.01" value="0.12">
+    </div>
+    <div class="row">
+      <label class="switch">Подписи аналогов мозга / Nengo-узлов
+        <span><input type="checkbox" id="cLabels" checked><span class="knob"></span></span>
+      </label>
+    </div>
+    <h4>Топология (от центра наружу)</h4>
+    <div class="mono" style="font-size:11px;color:var(--dim);line-height:1.7" id="topoList"></div>
+  </div>
+</aside>
+
+<!-- ======== Нижний док ======== -->
+<div id="dock" class="hud">
+  <div class="seg drumsel" id="segDrum">
+    <button data-d="0" class="active">G1</button>
+    <button data-d="1">G2</button>
+    <button data-d="2">G3</button>
+  </div>
+  <button class="btn primary" id="btnPulse">⟳ Импульс / Прокрутить барабан</button>
+  <div class="dock-sep"></div>
+  <div class="seg" id="segCam">
+    <button data-cam="3d" class="active">3D-перспектива</button>
+    <button data-cam="2d">2D-вид сверху</button>
+  </div>
+  <div class="dock-sep"></div>
+  <button class="btn" id="btnReset">Сброс спайков</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+document.getElementById('loading').remove();
+
+/* =====================================================================
+   ПАРАМЕТРЫ (только из ТЗ)
+   ===================================================================== */
+const P = {
+  K: 7, threshold: -55, tau: 40, gain: 1.0, discrete: true, latch: false,
+  scale: 1.0, density: 24, greenW: 0.30, redW: 0.12, labels: true,
+};
+const V_REST = -70;        // мВ, потенциал покоя
+const EPSP   = 24;         // мВ, вклад одного синапса (до веса и усиления)
+const DISCRETE_SECTORS = 10;
+const TAU2 = Math.PI * 2;
+const HEAD_ANGLE = [Math.PI / 2 - 0.55, Math.PI / 2 + 0.55]; // голубые нейроны на красных кольцах
+
+/* =====================================================================
+   РЕНДЕРЕР / СЦЕНА / КАМЕРА
+   ===================================================================== */
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+app.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(window.innerWidth, window.innerHeight);
+Object.assign(labelRenderer.domElement.style, { position: 'fixed', inset: '0', pointerEvents: 'none' });
+app.appendChild(labelRenderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070a);
+scene.fog = new THREE.Fog(0x05070a, 26, 60);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 200);
+const CAM3D = new THREE.Vector3(0, 8.5, 11.5);
+camera.position.copy(CAM3D);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.minDistance = 3;
+controls.maxDistance = 45;
+
+scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x0a0c10, 0.55));
+scene.add(new THREE.AmbientLight(0xffffff, 0.18));
+const key = new THREE.DirectionalLight(0xffffff, 1.35);
+key.position.set(6, 12, 7);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x6fb6ff, 0.45);
+rim.position.set(-8, 4, -9);
+scene.add(rim);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.4, 0.6);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+const root = new THREE.Group();   // вся «луковица» (масштабируется)
+scene.add(root);
+
+/* =====================================================================
+   УТИЛИТЫ
+   ===================================================================== */
+const polar = (r, phi, y = 0) => new THREE.Vector3(r * Math.cos(phi), y, r * Math.sin(phi));
+const wrapPi = a => { a = (a + Math.PI) % TAU2; if (a < 0) a += TAU2; return a - Math.PI; };
+const norm2pi = a => { a %= TAU2; return a < 0 ? a + TAU2 : a; };
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+function hash32(...xs) {
+  let h = 2166136261 >>> 0;
+  for (const x of xs) { h ^= (x | 0) + 0x9e3779b9; h = Math.imul(h ^ (h >>> 15), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); h ^= h >>> 16; }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+function annulusGeo(rIn, rOut, depth, seg = 128) {
+  const s = new THREE.Shape(); s.absarc(0, 0, rOut, 0, TAU2, false);
+  const h = new THREE.Path(); h.absarc(0, 0, rIn, 0, TAU2, true); s.holes.push(h);
+  const g = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false, curveSegments: seg });
+  g.rotateX(-Math.PI / 2); // лёжа в плоскости XZ, толщина по +Y
+  return g;
+}
+function makeLabel(text, cls, pos, parent) {
+  const d = document.createElement('div'); d.className = 'lbl ' + cls; d.textContent = text;
+  const o = new CSS2DObject(d); o.position.copy(pos); parent.add(o); return o;
+}
+
+/* ---------- геометрия сомы с микрорельефом мембраны ---------- */
+const somaCache = new Map();
+function somaGeometry(r) {
+  const k = r.toFixed(3);
+  if (somaCache.has(k)) return somaCache.get(k);
+  const g = new THREE.IcosahedronGeometry(r, 3);
+  const p = g.attributes.position, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const n = v.clone().normalize();
+    const bump = Math.sin(n.x * 13.1 + n.y * 7.3) * Math.sin(n.y * 11.7 + n.z * 5.9) * Math.sin(n.z * 9.7 + n.x * 3.1);
+    v.multiplyScalar(1 + 0.09 * bump);
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  somaCache.set(k, g);
+  return g;
+}
+const nucleusMat = new THREE.MeshStandardMaterial({ color: 0x2c3442, roughness: 0.5, emissive: 0xffd36b, emissiveIntensity: 0 });
+const neuriteMat = new THREE.MeshStandardMaterial({ color: 0x6f7883, roughness: 0.8 });
+const neuriteGeo = new THREE.CylinderGeometry(0.5, 1, 1, 6, 1, true); // масштабируется под нейрон
+const UP = new THREE.Vector3(0, 1, 0);
+
+function makeBaseNeuron(r, seed) {
+  const grp = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x9aa3ad, roughness: 0.72, metalness: 0.05, transparent: true, opacity: 0.86,
+    emissive: 0xffe9a3, emissiveIntensity: 0,
+  });
+  const soma = new THREE.Mesh(somaGeometry(r), mat);
+  grp.add(soma);
+  const nuc = new THREE.Mesh(new THREE.SphereGeometry(r * 0.42, 12, 10), nucleusMat.clone());
+  grp.add(nuc);
+  const rnd = mulberry32(seed);
+  const nProc = 3 + Math.floor(rnd() * 3);
+  for (let i = 0; i < nProc; i++) {
+    const a = rnd() * TAU2, el = (rnd() - 0.3) * 0.9;
+    const dir = new THREE.Vector3(Math.cos(a) * Math.cos(el), Math.sin(el), Math.sin(a) * Math.cos(el)).normalize();
+    const len = r * (0.9 + rnd() * 0.9);
+    const m = new THREE.Mesh(neuriteGeo, neuriteMat);
+    m.scale.set(r * 0.13, len, r * 0.13);
+    m.quaternion.setFromUnitVectors(UP, dir.clone().negate());
+    m.position.copy(dir.multiplyScalar(r * 0.85 + len / 2));
+    grp.add(m);
+  }
+  return { grp, mat, nucMat: nuc.material };
+}
+
+/* =====================================================================
+   СОСТОЯНИЕ
+   ===================================================================== */
+const S = {
+  theta: [0, 0, 0], omega: [0, 0, 0], stepTarget: [null, null, null],
+  lastSector: [0, 0, 0], drumFlash: [0, 0, 0], drumGlow: [0.05, 0.05, 0.05],
+  selected: 0, dragging: -1, dragPhi: 0, dragT: 0,
+  simTime: 0, totalSpikes: 0, lastActive: 0, lastFired: 0,
+  lastContact: null, headPhase: [0, 1.7], headFlash: [0, 0], headGlow: [0, 0],
+  redFlash: [0, 0], coreFlash: 0, camMode: '3d', camAnim: null,
+};
+let L = null;                 // радиусы
+let drums = [];               // {group, mesh, mat}
+let redRings = [];            // {mesh, mat}
+let heads = [];               // {grp, mat, pos}
+let base = [[], [], []];      // нейроны трёх белых слоёв
+let core = null;
+let wires = [];
+let waves = [];
+let labelObjs = [];
+let pickables = [];
+
+function computeLayout() {
+  const g = P.greenW, r = P.redW, gap = 0.32, bw = 0.5;
+  const R = { core: 1.15, green: [], base: [], red: [] };
+  let x = R.core + 0.22;
+  R.green[0] = x + g / 2; x += g + gap;
+  R.base[0] = x + bw / 2; x += bw + gap;
+  R.red[0] = x + r / 2; x += r + gap;
+  R.green[1] = x + g / 2; x += g + gap;
+  R.base[1] = x + bw / 2; x += bw + gap;
+  R.red[1] = x + r / 2; x += r + gap;
+  R.green[2] = x + g / 2; x += g + gap;
+  R.base[2] = x + bw / 2; x += bw;
+  R.outer = x;
+  R.bw = bw;
+  return R;
+}
+
+/* =====================================================================
+   ПОСТРОЕНИЕ СЦЕНЫ
+   ===================================================================== */
+function disposeTree(o) {
+  o.traverse(c => {
+    if (c.geometry && !somaCacheHas(c.geometry) && c.geometry !== neuriteGeo) c.geometry.dispose();
+    if (c.material && c.material !== neuriteMat && c.material !== nucleusMat) {
+      (Array.isArray(c.material) ? c.material : [c.material]).forEach(m => m.dispose());
+    }
+  });
+}
+function somaCacheHas(g) { for (const v of somaCache.values()) if (v === g) return true; return false; }
+
+function build() {
+  // очистка
+  labelObjs.forEach(l => { l.element.remove(); l.parent && l.parent.remove(l); });
+  labelObjs = [];
+  while (root.children.length) { const c = root.children[0]; root.remove(c); disposeTree(c); }
+  wires = []; waves = []; pickables = [];
+  drums = []; redRings = []; heads = []; base = [[], [], []];
+
+  L = computeLayout();
+
+  // подложка + полярная сетка
+  const sub = new THREE.Mesh(new THREE.CircleGeometry(L.outer + 0.7, 128),
+    new THREE.MeshStandardMaterial({ color: 0x0a0e13, roughness: 0.95 }));
+  sub.rotation.x = -Math.PI / 2; sub.position.y = -0.03; root.add(sub);
+  const pg = new THREE.PolarGridHelper(L.outer + 0.7, 16, 8, 96, 0x18222c, 0x111920);
+  pg.position.y = -0.02; root.add(pg);
+
+  /* ---------- ядро ---------- */
+  const coreGrp = new THREE.Group(); root.add(coreGrp);
+  const coreMat = new THREE.MeshStandardMaterial({ color: 0x1b1712, roughness: 0.6, emissive: 0xffa53a, emissiveIntensity: 0.12 });
+  const coreDisc = new THREE.Mesh(new THREE.CylinderGeometry(L.core, L.core, 0.06, 96), coreMat);
+  coreDisc.position.y = 0.03; coreGrp.add(coreDisc);
+  const mkPace = (col, x) => {
+    const m = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.6, roughness: 0.35 });
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.2, 24, 18), m); s.position.set(x, 0.24, 0); coreGrp.add(s);
+    return { mesh: s, mat: m };
+  };
+  const M = mkPace(0xffb84d, -0.42), A = mkPace(0xc77dff, 0.42);
+  const starters = [];
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * TAU2 + Math.PI / 6;
+    const n = makeBaseNeuron(0.1, hash32(99, i));
+    n.grp.position.copy(polar(0.78, a, 0.16)); coreGrp.add(n.grp);
+    starters.push({ ...n, glow: 0, firedUntil: -1 });
+  }
+  core = { grp: coreGrp, mat: coreMat, M, A, starters };
+
+  /* ---------- белые слои базовых нейронов ---------- */
+  for (let k = 0; k < 3; k++) {
+    const rr = L.base[k];
+    const lane = new THREE.Mesh(annulusGeo(rr - L.bw / 2, rr + L.bw / 2, 0.012),
+      new THREE.MeshStandardMaterial({ color: 0xcfd6de, transparent: true, opacity: 0.07, roughness: 1 }));
+    root.add(lane);
+    const n = P.density;
+    const somaR = Math.min(0.13, Math.PI * rr / n * 0.4);
+    for (let i = 0; i < n; i++) {
+      const phi = (i + 0.5) / n * TAU2;
+      const neu = makeBaseNeuron(somaR, hash32(k, i, n));
+      const pos = polar(rr, phi, somaR * 1.05);
+      neu.grp.position.copy(pos);
+      root.add(neu.grp);
+      const w = 0.7 + 0.6 * mulberry32(hash32(7, k, i))();   // фиксированный вес нейрона
+      base[k].push({ ...neu, layer: k, idx: i, phi, baseY: pos.y, v: V_REST, w,
+        glow: 0, firedUntil: -1, refractUntil: -1 });
+    }
+  }
+
+  /* ---------- красные дендритные кольца инстинкта + голубые головные нейроны ---------- */
+  for (let k = 0; k < 2; k++) {
+    const rr = L.red[k];
+    const mat = new THREE.MeshStandardMaterial({ color: 0x4a0d12, roughness: 0.5, emissive: 0xff2a3a, emissiveIntensity: 0.25 });
+    const mesh = new THREE.Mesh(annulusGeo(rr - P.redW / 2, rr + P.redW / 2, 0.035), mat);
+    root.add(mesh);
+    redRings.push({ mesh, mat });
+
+    const hp = polar(rr, HEAD_ANGLE[k], 0);
+    const hg = new THREE.Group(); hg.position.copy(hp); root.add(hg);
+    const hmat = new THREE.MeshStandardMaterial({ color: 0x7fd4ff, roughness: 0.3, metalness: 0.1, emissive: 0x4fc3ff, emissiveIntensity: 0.5 });
+    const body = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.42, 5), hmat);
+    body.position.y = 0.23; hg.add(body);
+    const apical = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.035, 0.5, 6), hmat);
+    apical.position.y = 0.66; hg.add(apical);
+    const basal = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.025, 6, 24), hmat);
+    basal.rotation.x = Math.PI / 2; basal.position.y = 0.03; hg.add(basal);
+    heads.push({ grp: hg, mat: hmat, pos: hp.clone().setY(0.25) });
+  }
+
+  /* ---------- зелёные аксональные барабаны (без нейронов) ---------- */
+  for (let k = 0; k < 3; k++) {
+    const rr = L.green[k], g = P.greenW;
+    const group = new THREE.Group(); group.rotation.y = S.theta[k]; root.add(group);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x0c3a23, roughness: 0.62, metalness: 0.15, emissive: 0x19e68c, emissiveIntensity: 0.05 });
+    const mesh = new THREE.Mesh(annulusGeo(rr - g / 2, rr + g / 2, 0.07), mat);
+    mesh.userData.drum = k; group.add(mesh); pickables.push(mesh);
+    // отверстия «дискового набора» (10 позиций)
+    const holeMat = new THREE.MeshStandardMaterial({ color: 0x04130b, roughness: 0.9 });
+    const holeGeo = new THREE.CylinderGeometry(g * 0.27, g * 0.27, 0.02, 20);
+    for (let i = 0; i < DISCRETE_SECTORS; i++) {
+      const phi = (i + 0.5) / DISCRETE_SECTORS * TAU2;
+      const h = new THREE.Mesh(holeGeo, holeMat); h.position.copy(polar(rr, phi, 0.071));
+      h.userData.drum = k; group.add(h); pickables.push(h);
+    }
+    // перехваты Ранвье (тёмные радиальные полосы на границах секторов)
+    const nodeGeo = new THREE.BoxGeometry(g * 1.02, 0.02, 0.025);
+    const nodeMat = new THREE.MeshStandardMaterial({ color: 0x062214, roughness: 0.9 });
+    for (let i = 0; i < DISCRETE_SECTORS; i++) {
+      const phi = i / DISCRETE_SECTORS * TAU2;
+      const b = new THREE.Mesh(nodeGeo, nodeMat); b.position.copy(polar(rr, phi, 0.071)); b.rotation.y = -phi;
+      group.add(b);
+    }
+    // метка нулевой позиции
+    const zero = new THREE.Mesh(new THREE.BoxGeometry(g * 0.5, 0.03, 0.05),
+      new THREE.MeshStandardMaterial({ color: 0xbfffe1, emissive: 0x19e68c, emissiveIntensity: 0.9 }));
+    zero.position.copy(polar(rr + g * 0.2, 0, 0.08)); group.add(zero);
+    // неподвижный «упор» контакта (точка выхода аксона источника)
+    const srcPhi = k === 0 ? Math.PI / 2 : HEAD_ANGLE[k - 1];
+    const stop = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.1, 0.06),
+      new THREE.MeshStandardMaterial({ color: 0xdfffee, emissive: 0x19e68c, emissiveIntensity: 0.6 }));
+    stop.position.copy(polar(rr + g / 2 + 0.09, srcPhi, 0.08)); stop.rotation.y = -srcPhi;
+    root.add(stop);
+    drums.push({ group, mesh, mat, srcPhi, contact: polar(rr, srcPhi, 0.1) });
+  }
+
+  /* ---------- подписи ---------- */
+  labelObjs.push(makeLabel('Core: Таламус / Input Node', 'core', new THREE.Vector3(0, 0.75, -0.55), root));
+  labelObjs.push(makeLabel('M · мотивация', 'core', new THREE.Vector3(-0.42, 0.45, 0.4), root));
+  labelObjs.push(makeLabel('A · активация', 'core', new THREE.Vector3(0.42, 0.45, -0.4), root));
+  for (let k = 0; k < 3; k++)
+    labelObjs.push(makeLabel(`G${k + 1} · Green: Аксоны / Connection Transform`, 'green', polar(L.green[k], -Math.PI / 2 - 0.25 * k, 0.15), root));
+  for (let k = 0; k < 2; k++) {
+    labelObjs.push(makeLabel(`R${k + 1} · Red: Дендриты / Instinct Ensemble`, 'red', polar(L.red[k], -Math.PI / 2 + 0.55 + 0.3 * k, 0.1), root));
+    labelObjs.push(makeLabel(`H${k + 1} · Blue: Головной пирамидный нейрон`, 'blue', heads[k].pos.clone().setY(0.95), root));
+  }
+  for (let k = 0; k < 3; k++)
+    labelObjs.push(makeLabel(`B${k + 1} · Base Ensemble (${P.density})`, 'white', polar(L.base[k], Math.PI + 0.2 * k, 0.3), root));
+  applyLabels();
+
+  // текущие сектора без срабатывания
+  for (let k = 0; k < 3; k++) S.lastSector[k] = sectorOf(k);
+  updateTopoList();
+}
+
+function applyLabels() { labelRenderer.domElement.style.display = P.labels ? '' : 'none'; }
+
+function updateTopoList() {
+  const f = x => x.toFixed(2);
+  document.getElementById('topoList').innerHTML = [
+    `R0  Ядро (M, A, 6 стартовых)   r ≤ ${f(L.core)}`,
+    `G1  аксональный барабан        r = ${f(L.green[0])}  ← источник: M/A`,
+    `B1  базовые нейроны × ${P.density}       r = ${f(L.base[0])}`,
+    `R1  дендриты инстинкта + H1    r = ${f(L.red[0])}`,
+    `G2  аксональный барабан        r = ${f(L.green[1])}  ← источник: H1`,
+    `B2  базовые нейроны × ${P.density}       r = ${f(L.base[1])}`,
+    `R2  дендриты инстинкта + H2    r = ${f(L.red[1])}`,
+    `G3  аксональный барабан        r = ${f(L.green[2])}  ← источник: H2`,
+    `B3  базовые нейроны × ${P.density}       r = ${f(L.base[2])}`,
+  ].join('<br>');
+}
+
+/* =====================================================================
+   КОММУТАЦИЯ: угол барабана → сектор → K целевых нейронов
+   ===================================================================== */
+function sectorCount() { return P.discrete ? DISCRETE_SECTORS : P.density; }
+function sectorOf(k) {
+  const N = sectorCount();
+  return Math.floor(norm2pi(S.theta[k]) / (TAU2 / N)) % N;
+}
+function pickTargets(k, sector) {
+  const layer = base[k], n = layer.length, K = Math.min(P.K, n);
+  const rnd = mulberry32(hash32(k, sector, n, sectorCount()));
+  const idx = Array.from({ length: n }, (_, i) => i);
+  for (let i = 0; i < K; i++) { const j = i + Math.floor(rnd() * (n - i)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+  return idx.slice(0, K);
+}
+
+function contact(k, sector) {
+  const layer = base[k];
+  const targets = pickTargets(k, sector);
+  const now = S.simTime;
+  const srcPos = k === 0 ? (sector % 2 ? core.A.mesh.position : core.M.mesh.position).clone() : heads[k - 1].pos.clone();
+  const drive = k === 0 ? 1 : P.gain;
+  const fired = [];
+  for (const i of targets) {
+    const n = layer[i];
+    if (now < n.refractUntil) { fired.push(false); continue; }
+    n.v += EPSP * n.w * drive;
+    if (n.v >= P.threshold) {
+      n.firedUntil = now + P.tau; n.refractUntil = now + P.tau; n.v = V_REST;
+      fired.push(true); S.totalSpikes++;
+      spawnWave(k, n.phi);
+    } else fired.push(false);
+  }
+  S.drumFlash[k] = 1;
+  if (k === 0) S.coreFlash = 1; else S.headFlash[k - 1] = Math.max(S.headFlash[k - 1], 0.8);
+  S.lastActive = targets.length;
+  S.lastFired = fired.filter(Boolean).length;
+  S.lastContact = { k, sector, targets, fired, N: sectorCount(), theta: S.theta[k] };
+  spawnWires(k, srcPos, targets, fired);
+  renderInspector();
+}
+
+/* ---------- временные провода контакта (видны только при замыкании) ---------- */
+function spawnWires(k, srcPos, targets, fired) {
+  const pts = [], cols = [];
+  const cp = drums[k].contact;
+  const cG = new THREE.Color(0x19e68c), cW = new THREE.Color(0xffe9a3), cD = new THREE.Color(0x3f8f6a);
+  pts.push(srcPos.x, srcPos.y, srcPos.z, cp.x, cp.y, cp.z); cols.push(...cG.toArray(), ...cG.toArray());
+  targets.forEach((i, j) => {
+    const p = base[k][i].grp.position;
+    const c = fired[j] ? cW : cD;
+    pts.push(cp.x, cp.y, cp.z, p.x, p.y, p.z); cols.push(...cG.toArray(), ...c.toArray());
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  const m = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false });
+  const line = new THREE.LineSegments(g, m);
+  root.add(line);
+  // предыдущие провода гасим быстрее, чтобы не копилась «лапша»
+  wires.forEach(w => w.dying = true);
+  wires.push({ line, born: S.simTime, dying: false });
+}
+
+/* ---------- обратная волна по красному дендритному кольцу ---------- */
+const waveGeo = new THREE.SphereGeometry(0.075, 12, 10);
+function spawnWave(k, phiFrom) {
+  const r = k === 2 ? 1 : k;              // B1→R1, B2→R2, B3→R2 (внутрь)
+  if (waves.length > 40) return;
+  const mat = new THREE.MeshBasicMaterial({ color: 0xff5a66, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false });
+  const m = new THREE.Mesh(waveGeo, mat);
+  const d = wrapPi(HEAD_ANGLE[r] - phiFrom);
+  const dur = 180 + Math.abs(d) * 160;     // мс времени сети
+  m.position.copy(polar(L.red[r], phiFrom, 0.08));
+  root.add(m);
+  waves.push({ mesh: m, mat, r, from: phiFrom, d, born: S.simTime, dur });
+}
+
+/* =====================================================================
+   ИНСПЕКТОР
+   ===================================================================== */
+function renderInspector() {
+  const c = S.lastContact; if (!c) return;
+  const src = c.k === 0 ? 'M/A (ядро)' : `H${c.k} (головной)`;
+  let h = `<div>Барабан <b style="color:var(--green)">G${c.k + 1}</b> · сектор <b class="mono">${c.sector}/${c.N}</b> · θ=${(norm2pi(c.theta) * 180 / Math.PI).toFixed(1)}°</div>`;
+  h += `<div style="color:var(--dim);margin:3px 0 5px">Источник: ${src} → слой B${c.k + 1} · K=${c.targets.length}, сработало ${c.fired.filter(Boolean).length}</div>`;
+  h += c.targets.map((i, j) => `<span class="chip ${c.fired[j] ? 'on' : ''}" title="вес ${base[c.k][i].w.toFixed(2)}">B${c.k + 1}#${i}</span>`).join('');
+  document.getElementById('inspector').innerHTML = h;
+}
+
+/* =====================================================================
+   ЗВУК (Web Audio API, без внешних файлов)
+   ===================================================================== */
+let actx = null, noiseBuf = null, lastClick = 0;
+function ensureAudio() {
+  if (!actx) {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    const len = Math.floor(actx.sampleRate * 0.03);
+    noiseBuf = actx.createBuffer(1, len, actx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 6);
+  }
+  if (actx.state === 'suspended') actx.resume();
+}
+function click(vol = 1) {
+  if (!actx) return;
+  const nowMs = performance.now(); if (nowMs - lastClick < 22) return; lastClick = nowMs;
+  const t = actx.currentTime;
+  const src = actx.createBufferSource(); src.buffer = noiseBuf;
+  const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 2.5;
+  const g = actx.createGain(); g.gain.value = 0.55 * vol;
+  src.connect(bp).connect(g).connect(actx.destination); src.start(t);
+  const o = actx.createOscillator(); o.type = 'triangle';
+  o.frequency.setValueAtTime(1900, t); o.frequency.exponentialRampToValueAtTime(520, t + 0.025);
+  const og = actx.createGain(); og.gain.setValueAtTime(0.09 * vol, t); og.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+  o.connect(og).connect(actx.destination); o.start(t); o.stop(t + 0.035);
+}
+
+/* =====================================================================
+   ВЗАИМОДЕЙСТВИЕ (Raycasting + захват барабана)
+   ===================================================================== */
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const tmpV = new THREE.Vector3();
+
+function setNdc(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+}
+function pickDrum(ev) {
+  setNdc(ev);
+  const hit = raycaster.intersectObjects(pickables, false)[0];
+  return hit ? hit.object.userData.drum : -1;
+}
+function planeAngle(ev) {
+  setNdc(ev);
+  if (!raycaster.ray.intersectPlane(floorPlane, tmpV)) return null;
+  root.worldToLocal(tmpV);
+  return Math.atan2(tmpV.z, tmpV.x);
+}
+
+// capture-фаза на контейнере: срабатывает раньше OrbitControls
+app.addEventListener('pointerdown', ev => {
+  ensureAudio();
+  const k = pickDrum(ev);
+  if (k < 0) return;
+  selectDrum(k);
+  if (P.latch) return;
+  const phi = planeAngle(ev); if (phi === null) return;
+  controls.enabled = false;
+  S.dragging = k; S.dragPhi = phi; S.dragT = performance.now();
+  S.omega[k] = 0; S.stepTarget[k] = null;
+  renderer.domElement.style.cursor = 'grabbing';
+  renderer.domElement.setPointerCapture?.(ev.pointerId);
+  ev.stopPropagation();
+}, true);
+
+renderer.domElement.addEventListener('pointermove', ev => {
+  if (S.dragging >= 0) {
+    const k = S.dragging, phi = planeAngle(ev); if (phi === null) return;
+    const d = wrapPi(phi - S.dragPhi), t = performance.now(), dt = Math.max(1, t - S.dragT) / 1000;
+    S.theta[k] -= d;
+    S.omega[k] = S.omega[k] * 0.6 + (-d / dt) * 0.4;
+    S.dragPhi = phi; S.dragT = t;
+    return;
+  }
+  const k = pickDrum(ev);
+  renderer.domElement.style.cursor = k >= 0 ? (P.latch ? 'not-allowed' : 'grab') : '';
+});
+function endDrag(ev) {
+  if (S.dragging < 0) return;
+  const k = S.dragging;
+  if (performance.now() - S.dragT > 80) S.omega[k] = 0;   // отпустили без броска
+  S.dragging = -1;
+  controls.enabled = true;
+  renderer.domElement.style.cursor = 'grab';
+  renderer.domElement.releasePointerCapture?.(ev.pointerId);
+}
+renderer.domElement.addEventListener('pointerup', endDrag);
+renderer.domElement.addEventListener('pointercancel', endDrag);
+
+function selectDrum(k) {
+  S.selected = k;
+  document.querySelectorAll('#segDrum button').forEach(b => b.classList.toggle('active', +b.dataset.d === k));
+}
+
+/* =====================================================================
+   UI-ПРИВЯЗКИ
+   ===================================================================== */
+function bindRange(id, outId, key, fmt, onChange) {
+  const el = document.getElementById(id), out = document.getElementById(outId);
+  const upd = () => { P[key] = parseFloat(el.value); out.textContent = fmt(P[key]); onChange && onChange(); };
+  el.addEventListener('input', upd); upd();
+}
+bindRange('sK', 'vK', 'K', v => v.toFixed(0));
+bindRange('sThr', 'vThr', 'threshold', v => `${v.toFixed(0)} мВ`);
+bindRange('sTau', 'vTau', 'tau', v => `${v.toFixed(0)} мс`);
+bindRange('sGain', 'vGain', 'gain', v => `${v.toFixed(2)}×`);
+bindRange('sScale', 'vScale', 'scale', v => `${v.toFixed(2)}×`, () => root.scale.setScalar(P.scale));
+let rebuildTimer = null;
+const scheduleRebuild = () => { clearTimeout(rebuildTimer); rebuildTimer = setTimeout(build, 60); };
+bindRange('sDens', 'vDens', 'density', v => v.toFixed(0), () => L && scheduleRebuild());
+bindRange('sGW', 'vGW', 'greenW', v => v.toFixed(2), () => L && scheduleRebuild());
+bindRange('sRW', 'vRW', 'redW', v => v.toFixed(2), () => L && scheduleRebuild());
+
+document.getElementById('cLatch').addEventListener('change', e => { P.latch = e.target.checked; if (P.latch) { S.dragging = -1; controls.enabled = true; S.omega = [0, 0, 0]; } });
+document.getElementById('cLabels').addEventListener('change', e => { P.labels = e.target.checked; applyLabels(); });
+
+document.querySelectorAll('#segMode button').forEach(b => b.addEventListener('click', () => {
+  P.discrete = b.dataset.mode === 'discrete';
+  document.querySelectorAll('#segMode button').forEach(x => x.classList.toggle('active', x === b));
+  for (let k = 0; k < 3; k++) S.lastSector[k] = sectorOf(k);
+}));
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.tabpane').forEach(p => p.classList.toggle('active', p.id === t.dataset.tab));
+}));
+document.getElementById('collapseBtn').addEventListener('click', () => {
+  document.body.classList.toggle('panel-collapsed');
+  document.getElementById('collapseBtn').textContent = document.body.classList.contains('panel-collapsed') ? '‹' : '›';
+});
+document.querySelectorAll('#segDrum button').forEach(b => b.addEventListener('click', () => selectDrum(+b.dataset.d)));
+
+document.getElementById('btnPulse').addEventListener('click', () => {
+  ensureAudio();
+  if (P.latch) return;
+  const k = S.selected, step = TAU2 / sectorCount();
+  const cur = S.stepTarget[k] ?? S.theta[k];
+  S.omega[k] = 0;
+  S.stepTarget[k] = (Math.floor(cur / step) + 1.5) * step;   // центр следующего сектора
+});
+document.getElementById('btnReset').addEventListener('click', () => {
+  base.flat().forEach(n => { n.v = V_REST; n.firedUntil = -1; n.refractUntil = -1; });
+  wires.forEach(w => { root.remove(w.line); w.line.geometry.dispose(); w.line.material.dispose(); }); wires = [];
+  waves.forEach(w => { root.remove(w.mesh); w.mat.dispose(); }); waves = [];
+  S.totalSpikes = 0; S.lastActive = 0; S.lastFired = 0; S.lastContact = null;
+  S.drumFlash = [0, 0, 0]; S.headFlash = [0, 0]; S.redFlash = [0, 0]; S.coreFlash = 0;
+  document.getElementById('inspector').innerHTML = '<span style="color:var(--dim)">Спайки сброшены.</span>';
+});
+document.querySelectorAll('#segCam button').forEach(b => b.addEventListener('click', () => {
+  S.camMode = b.dataset.cam;
+  document.querySelectorAll('#segCam button').forEach(x => x.classList.toggle('active', x === b));
+  const fit = L.outer * P.scale * 3.3;
+  const to = S.camMode === '2d' ? new THREE.Vector3(0, fit, 0.001) : CAM3D.clone().multiplyScalar(Math.max(1, P.scale * 0.85));
+  S.camAnim = { from: camera.position.clone(), fromT: controls.target.clone(), to, t: 0 };
+  controls.enableRotate = S.camMode === '3d';
+}));
+
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  renderer.setSize(w, h); composer.setSize(w, h); labelRenderer.setSize(w, h); bloom.setSize(w, h);
+});
+
+/* =====================================================================
+   ЦИКЛ АНИМАЦИИ
+   ===================================================================== */
+const clock = new THREE.Clock();
+let fpsAcc = 0, fpsFrames = 0, hudAcc = 0;
+const lerpK = (rate, dt) => 1 - Math.exp(-rate * dt);
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const dms = P.latch ? 0 : dt * 1000;
+  S.simTime += dms;
+
+  /* --- физика барабанов --- */
+  for (let k = 0; k < 3; k++) {
+    if (!P.latch && S.dragging !== k) {
+      if (S.stepTarget[k] !== null) {
+        const d = S.stepTarget[k] - S.theta[k];
+        S.theta[k] += d * lerpK(14, dt);
+        if (Math.abs(d) < 0.002) { S.theta[k] = S.stepTarget[k]; S.stepTarget[k] = null; }
+      } else if (Math.abs(S.omega[k]) > 0.4) {
+        S.theta[k] += S.omega[k] * dt;
+        S.omega[k] *= Math.exp(-dt * 2.4);          // инерция с трением
+      } else {
+        S.omega[k] = 0;
+        if (P.discrete) {                            // защёлка на секторе
+          const step = TAU2 / DISCRETE_SECTORS;
+          const tgt = (Math.floor(S.theta[k] / step) + 0.5) * step;
+          S.theta[k] += (tgt - S.theta[k]) * lerpK(10, dt);
+        }
+      }
+    }
+    if (drums[k]) drums[k].group.rotation.y = S.theta[k];
+    const sec = sectorOf(k);
+    if (sec !== S.lastSector[k] && !P.latch) {
+      S.lastSector[k] = sec;
+      click(P.discrete ? 1 : 0.35);
+      selectDrumSilently(k);
+      contact(k, sec);
+    }
+  }
+
+  /* --- свечение барабанов --- */
+  const tauS = P.tau / 1000;
+  for (let k = 0; k < 3; k++) {
+    if (!P.latch) S.drumFlash[k] *= Math.exp(-dt / Math.max(tauS, 0.005) * 0.35);
+    const held = S.dragging === k || (P.latch && S.lastContact && S.lastContact.k === k);
+    const tgt = held ? 1.5 : 0.05 + (S.selected === k ? 0.08 : 0) + S.drumFlash[k] * 1.6;
+    S.drumGlow[k] += (tgt - S.drumGlow[k]) * lerpK(16, dt);
+    if (drums[k]) drums[k].mat.emissiveIntensity = S.drumGlow[k];
+  }
+
+  /* --- базовые нейроны: мембрана, подсветка, подъём --- */
+  const thrSpan = P.threshold - V_REST || 1;
+  for (const layer of base) for (const n of layer) {
+    if (!P.latch) n.v = V_REST + (n.v - V_REST) * Math.exp(-dms / P.tau);
+    const firing = S.simTime < n.firedUntil;   // при Latch время сети заморожено → подсветка удерживается
+    const tgt = firing ? 1 : clamp((n.v - V_REST) / thrSpan, 0, 1) * 0.3;
+    n.glow += (tgt - n.glow) * lerpK(firing ? 30 : 9, dt);
+    n.mat.emissiveIntensity = n.glow * 2.2;
+    n.nucMat.emissiveIntensity = n.glow * 1.5;
+    n.grp.position.y = n.baseY + n.glow * 0.2;
+    n.grp.scale.setScalar(1 + n.glow * 0.22);
+  }
+
+  /* --- пейсмекеры ядра --- */
+  if (core) {
+    if (!P.latch) S.coreFlash *= Math.exp(-dt * 5);
+    const p = 0.5 + 0.5 * Math.sin(S.simTime * 0.004);
+    core.M.mat.emissiveIntensity = 0.45 + 0.5 * p + S.coreFlash * 2;
+    core.A.mat.emissiveIntensity = 0.45 + 0.5 * (1 - p) + S.coreFlash * 2;
+    core.mat.emissiveIntensity = 0.1 + S.coreFlash * 0.6;
+    core.starters.forEach((s, i) => { s.mat.emissiveIntensity = S.coreFlash * (0.6 + 0.4 * Math.sin(i + S.simTime * 0.01)); });
+  }
+
+  /* --- головные нейроны и красные кольца инстинкта --- */
+  for (let k = 0; k < 2; k++) {
+    if (!heads[k]) continue;
+    S.headPhase[k] += dms / 1000 * TAU2 * 0.6 * P.gain;     // фоновая частота ∝ усилению
+    if (!P.latch) { S.headFlash[k] *= Math.exp(-dt * 4); S.redFlash[k] *= Math.exp(-dt * 3); }
+    const pulse = Math.pow(0.5 + 0.5 * Math.sin(S.headPhase[k]), 3);
+    const hg = 0.35 + pulse * 0.6 * Math.min(P.gain, 2) + S.headFlash[k] * 2.6;
+    S.headGlow[k] += (hg - S.headGlow[k]) * lerpK(18, dt);
+    heads[k].mat.emissiveIntensity = S.headGlow[k];
+    heads[k].grp.scale.setScalar(1 + S.headFlash[k] * 0.15);
+    redRings[k].mat.emissiveIntensity = 0.12 + 0.18 * P.gain * pulse + S.redFlash[k] * 1.6;
+  }
+
+  /* --- обратные волны по дендритам --- */
+  for (let i = waves.length - 1; i >= 0; i--) {
+    const w = waves[i];
+    const t = (S.simTime - w.born) / w.dur;
+    if (t >= 1) {
+      S.headFlash[w.r] = Math.max(S.headFlash[w.r], 1); S.redFlash[w.r] = Math.min(1.5, S.redFlash[w.r] + 0.35);
+      root.remove(w.mesh); w.mat.dispose(); waves.splice(i, 1); continue;
+    }
+    const e = t * t * (3 - 2 * t);
+    w.mesh.position.copy(polar(L.red[w.r], w.from + w.d * e, 0.08));
+    w.mat.opacity = 0.35 + 0.65 * Math.sin(Math.PI * t);
+    S.redFlash[w.r] = Math.max(S.redFlash[w.r], 0.4);
+  }
+
+  /* --- временные провода контакта --- */
+  for (let i = wires.length - 1; i >= 0; i--) {
+    const w = wires[i];
+    const age = S.simTime - w.born;
+    const alive = P.latch && !w.dying ? 1 : (age < P.tau && !w.dying ? 1 : 0);
+    w.line.material.opacity += (alive - w.line.material.opacity) * lerpK(alive ? 30 : (w.dying ? 18 : 7), dt);
+    if (!alive && w.line.material.opacity < 0.02) { root.remove(w.line); w.line.geometry.dispose(); w.line.material.dispose(); wires.splice(i, 1); }
+  }
+
+  /* --- камера --- */
+  if (S.camAnim) {
+    const a = S.camAnim; a.t = Math.min(1, a.t + dt / 0.7);
+    const e = a.t < 0.5 ? 2 * a.t * a.t : 1 - Math.pow(-2 * a.t + 2, 2) / 2;
+    camera.position.lerpVectors(a.from, a.to, e);
+    controls.target.lerpVectors(a.fromT, new THREE.Vector3(0, 0, 0), e);
+    if (a.t >= 1) S.camAnim = null;
+  }
+  controls.update();
+  composer.render();
+  labelRenderer.render(scene, camera);
+
+  /* --- HUD --- */
+  fpsAcc += dt; fpsFrames++; hudAcc += dt;
+  if (hudAcc > 0.1) {
+    hudAcc = 0;
+    const k = S.selected;
+    setTxt('tmActive', S.lastActive);
+    setTxt('tmFired', S.lastFired);
+    setTxt('tmDrum', `G${k + 1}${S.dragging === k ? ' ✋' : ''}`);
+    setTxt('tmTheta', `${(norm2pi(S.theta[k]) * 180 / Math.PI).toFixed(1)}°`);
+    setTxt('tmSector', `${sectorOf(k)} / ${sectorCount()}`);
+    setTxt('tmTotal', S.totalSpikes);
+    setTxt('tmTime', `${Math.round(S.simTime)} мс${P.latch ? ' ⏸' : ''}`);
+  }
+  if (fpsAcc > 0.5) { setTxt('tmFps', Math.round(fpsFrames / fpsAcc)); fpsAcc = 0; fpsFrames = 0; }
+}
+function selectDrumSilently(k) { if (S.selected !== k && S.dragging === k) selectDrum(k); }
+const txtCache = {};
+function setTxt(id, v) { v = String(v); if (txtCache[id] !== v) { txtCache[id] = v; document.getElementById(id).textContent = v; } }
+
+build();
+root.scale.setScalar(P.scale);
+tick();
+</script>
+</body>
+</html>

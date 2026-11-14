@@ -1859,6 +1859,21 @@ class FIMHandler(BaseHTTPRequestHandler):
             self._send_json(exp)
             return
 
+        if parsed.path in ("/3d", "/3d/", "/snn_onion.html"):
+            onion = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snn_onion.html")
+            try:
+                with open(onion, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                raw = "snn_onion.html не найден".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self._send_nocache_headers()
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
         raw = HTML_PAGE.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
